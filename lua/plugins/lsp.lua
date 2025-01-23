@@ -25,6 +25,7 @@ return {
         { name = "html",       setup = {} },
         { name = "cssls",      setup = {} },
         { name = "ts_ls",      setup = {} },
+        { name = "ocamllsp",      setup = {} },
         { name = "omnisharp",  setup = { cmd = { 'omnisharp' } } },
       }
 

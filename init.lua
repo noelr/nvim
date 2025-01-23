@@ -9,6 +9,11 @@ vim.o.undofile = false
 vim.o.backup = false
 vim.o.number = true
 vim.o.termguicolors = true
+vim.o.ignorecase = true
+vim.o.smartcase = true
+vim.o.incsearch = true
+vim.o.swapfile = false
+
 vim.cmd([[set signcolumn=number]])
 
 -- vim.cmd("set list listchars=tab:»·,trail:·") -- Display extra whitespace. Lua kann » irgendwie nicht
@@ -21,5 +26,9 @@ vim.keymap.set("n", "<leader>~", vim.diagnostic.show)
 
 require("config.lazy")
 require("floaterminal").setup()
+
+vim.diagnostic.config({
+  virtual_text = true,
+})
 
 -- `. go to last insert
