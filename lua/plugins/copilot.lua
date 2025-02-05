@@ -1,3 +1,4 @@
 return {
-  'ggml-org/llama.vim'
+  -- 'ggml-org/llama.vim'
+  'github/copilot.vim'
 }
