@@ -2,6 +2,11 @@ vim.o.wrap = false
 vim.keymap.set("n", "<c-c>", ":nohlsearch<cr>", { silent = true })
 vim.keymap.set("i", "<c-c>", "<esc>", { silent = true })
 
+vim.diagnostic.config({
+  -- virtual_lines = true,
+  virtual_text = { current_line = true }
+})
+
 -- Bootstrap lazy.nvim
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
 if not (vim.uv or vim.loop).fs_stat(lazypath) then
