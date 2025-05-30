@@ -1,6 +1,11 @@
 vim.o.wrap = false
 vim.keymap.set("n", "<c-c>", ":nohlsearch<cr>", { silent = true })
 vim.keymap.set("i", "<c-c>", "<esc>", { silent = true })
+vim.o.number = true
+vim.cmd([[set signcolumn=number]])
+vim.o.ignorecase = true
+vim.o.smartcase = true
+vim.o.incsearch = true
 
 vim.diagnostic.config({
   -- virtual_lines = true,
@@ -38,6 +43,9 @@ require("lazy").setup({
     { "folke/lazy.nvim" },
     { "folke/which-key.nvim", lazy = false,
       dependencies = { "nvim-tree/nvim-web-devicons", "echasnovski/mini.icons" },
+      opts = {
+        delay = 500,
+      }
     },
     { "folke/tokyonight.nvim", config = function()
       vim.cmd([[colorscheme tokyonight-moon]])
