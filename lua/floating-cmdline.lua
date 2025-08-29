@@ -88,12 +88,17 @@ end
 -- Create terminal buffer
 local function create_terminal_buffer()
   state.terminal_buf = vim.api.nvim_create_buf(false, true)
+  
+  -- Use neutral filetype to avoid conflicts with netrw and other plugins
   vim.api.nvim_buf_set_option(state.terminal_buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'filetype', 'vim')
+  vim.api.nvim_buf_set_option(state.terminal_buf, 'filetype', 'floatingcmd')
   vim.api.nvim_buf_set_option(state.terminal_buf, 'bufhidden', 'wipe')
   vim.api.nvim_buf_set_option(state.terminal_buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.terminal_buf, 'buflisted', false)
   vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', true)
+  
+  -- Set a unique buffer name to avoid conflicts
+  vim.api.nvim_buf_set_name(state.terminal_buf, '[Floating Command Terminal]')
 end
 
 -- Create floating terminal window
@@ -128,6 +133,12 @@ local function close_floating_cmdline()
   if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
     vim.api.nvim_win_close(state.terminal_win, true)
     state.terminal_win = nil
+  end
+  
+  -- Clean up terminal buffer explicitly to prevent conflicts
+  if state.terminal_buf and vim.api.nvim_buf_is_valid(state.terminal_buf) then
+    vim.api.nvim_buf_delete(state.terminal_buf, { force = true })
+    state.terminal_buf = nil
   end
   
   cleanup_focus_autocmd()
@@ -213,26 +224,52 @@ local function execute_command(cmd)
     return
   end
   
-  -- Capture command output
+  -- Capture command output with better isolation
   local output = {}
   
+  -- Switch to original window first, then set up redirection
+  local current_win = vim.api.nvim_get_current_win()
+  local target_win = state.original_win
+  
+  if target_win and vim.api.nvim_win_is_valid(target_win) then
+    vim.api.nvim_set_current_win(target_win)
+  end
+  
+  -- Set up output redirection in the target context
   vim.cmd('redir => g:floating_cmdline_output')
   
+  -- Commands that might cause buffer conflicts - handle specially
+  local buffer_commands = {
+    '^e%s', '^edit%s', '^new%s*$', '^vnew%s*$', '^tabnew%s', 
+    '^sp%s', '^split%s', '^vs%s', '^vsplit%s', '^tabe%s', '^tabedit%s'
+  }
+  
+  local is_buffer_command = false
+  for _, pattern in ipairs(buffer_commands) do
+    if cmd:match(pattern) then
+      is_buffer_command = true
+      break
+    end
+  end
+  
   local ok, result = pcall(function()
-    -- Execute in original window context
-    if state.original_win and vim.api.nvim_win_is_valid(state.original_win) then
-      local current_win = vim.api.nvim_get_current_win()
-      vim.api.nvim_set_current_win(state.original_win)
+    if is_buffer_command then
+      -- For buffer/file commands, don't use redir to avoid conflicts
+      vim.cmd('redir END')  -- End redir early
       vim.cmd(cmd)
-      if vim.api.nvim_win_is_valid(current_win) then
-        vim.api.nvim_set_current_win(current_win)
-      end
+      vim.cmd('redir => g:floating_cmdline_output')  -- Restart for any remaining output
     else
-      vim.cmd(cmd)
+      -- For other commands, use silent to reduce autocmd interference  
+      vim.cmd('silent! ' .. cmd)
     end
   end)
   
   vim.cmd('redir END')
+  
+  -- Switch back to terminal window
+  if current_win and vim.api.nvim_win_is_valid(current_win) then
+    vim.api.nvim_set_current_win(current_win)
+  end
   
   local captured_output = vim.g.floating_cmdline_output or ''
   vim.g.floating_cmdline_output = nil
