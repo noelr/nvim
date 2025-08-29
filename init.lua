@@ -62,7 +62,11 @@ require("lazy").setup({
         { "<leader>fh", "<cmd>Telescope help_tags<cr>", desc = "Help tags" },
         { "<leader>fs", "<cmd>Telescope git_status<cr>", desc = "Git status" },
         { "<leader>fn", function() require('telescope.builtin').find_files({ cwd = vim.fn.stdpath('config') }) end, desc = "Neovim config" },
+        { "<C-p>", function() require('command-palette').command_palette() end, desc = "Command palette" },
       },
+      config = function()
+        require('command-palette').setup()
+      end,
     },
     { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate" },
     { "neovim/nvim-lspconfig",
@@ -91,3 +95,6 @@ require("lazy").setup({
   -- automatically check for plugin updates
   -- checker = { enabled = true },
 })
+
+-- Setup floating command line
+require('floating-cmdline').setup()
