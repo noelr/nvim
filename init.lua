@@ -6,6 +6,8 @@ vim.cmd([[set signcolumn=number]])
 vim.o.ignorecase = true
 vim.o.smartcase = true
 vim.o.incsearch = true
+vim.o.scrolloff = 5
+vim.o.winwidth = 120
 
 vim.diagnostic.config({
   -- virtual_lines = true,
@@ -58,21 +60,25 @@ require("lazy").setup({
         { "<leader>fg", "<cmd>Telescope live_grep<cr>", desc = "Live grep" },
         { "<leader>fb", "<cmd>Telescope buffers<cr>", desc = "Buffers" },
         { "<leader>fh", "<cmd>Telescope help_tags<cr>", desc = "Help tags" },
+        { "<leader>fs", "<cmd>Telescope git_status<cr>", desc = "Git status" },
         { "<leader>fn", function() require('telescope.builtin').find_files({ cwd = vim.fn.stdpath('config') }) end, desc = "Neovim config" },
       },
     },
     { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate" },
     { "neovim/nvim-lspconfig",
       config = function()
-        vim.lsp.enable('csharp-language-server')
-        vim.lsp.enable('fsautocomplete')
-        vim.lsp.enable('haml-lint')
-        vim.lsp.enable('html-lsp')
-        vim.lsp.enable('lua-language-server')
-        vim.lsp.enable('ocaml-lsp')
+        -- vim.lsp.enable('csharp-ls')
+        -- vim.lsp.enable('fsautocomplete')
+        -- vim.lsp.enable('flow')
+        vim.lsp.enable('html')
+        vim.lsp.enable('lua_ls')
+        vim.lsp.enable('ocamllsp')
         vim.lsp.enable('omnisharp')
         vim.lsp.enable('solargraph')
-        vim.lsp.enable('typescript-language-server')
+        vim.lsp.config('ts_ls', {
+          filetypes = { "typescript", "typescriptreact" },
+        })
+        vim.lsp.enable('ts_ls')
       end
     },
     { "mason-org/mason.nvim",
