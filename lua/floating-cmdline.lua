@@ -297,7 +297,7 @@ local function execute_command(cmd)
   
   -- Close any active completion popups
   if vim.fn.pumvisible() == 1 then
-    vim.cmd('pclose')
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
   end
   
   -- Add to history
