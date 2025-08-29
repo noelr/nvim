@@ -89,13 +89,33 @@ end
 local function create_terminal_buffer()
   state.terminal_buf = vim.api.nvim_create_buf(false, true)
   
-  -- Use neutral filetype to avoid conflicts with netrw and other plugins
+  -- Use vim filetype to enable command completion
   vim.api.nvim_buf_set_option(state.terminal_buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'filetype', 'floatingcmd')
+  vim.api.nvim_buf_set_option(state.terminal_buf, 'filetype', 'vim')
   vim.api.nvim_buf_set_option(state.terminal_buf, 'bufhidden', 'wipe')
   vim.api.nvim_buf_set_option(state.terminal_buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.terminal_buf, 'buflisted', false)
   vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', true)
+  
+  -- Set up custom command completion
+  vim.api.nvim_buf_set_option(state.terminal_buf, 'completefunc', 'v:lua.floating_cmdline_complete')
+  vim.api.nvim_buf_set_option(state.terminal_buf, 'omnifunc', '')
+  
+  -- Disable Copilot for this buffer
+  vim.api.nvim_buf_set_var(state.terminal_buf, 'copilot_enabled', false)
+  
+  -- Create autocmd to disable LSP for this specific buffer
+  vim.api.nvim_create_autocmd({'BufEnter', 'BufWinEnter'}, {
+    buffer = state.terminal_buf,
+    callback = function()
+      -- Disable LSP clients for this buffer
+      local clients = vim.lsp.get_active_clients({ bufnr = state.terminal_buf })
+      for _, client in ipairs(clients) do
+        vim.lsp.buf_detach_client(state.terminal_buf, client.id)
+      end
+    end,
+    once = false,
+  })
   
   -- Set a unique buffer name to avoid conflicts
   vim.api.nvim_buf_set_name(state.terminal_buf, '[Floating Command Terminal]')
@@ -122,6 +142,69 @@ local function create_terminal_window()
   vim.api.nvim_win_set_option(state.terminal_win, 'scrolloff', 0)
 end
 
+-- Custom completion function for command completion
+local function command_complete(findstart, base)
+  if findstart == 1 then
+    local line = vim.fn.getline('.')
+    local col = vim.fn.col('.') - 1
+    
+    print("DEBUG findstart: line='" .. line .. "', col=" .. col)
+    
+    -- Skip the prompt part - find where command actually starts
+    local prompt_pos = line:find(vim.pesc(config.prompt), 1, true)
+    if not prompt_pos then
+      print("DEBUG: no prompt found")
+      return 0
+    end
+    
+    local cmd_start = prompt_pos + #config.prompt - 1
+    local cmd_line = line:sub(cmd_start + 1)
+    
+    print("DEBUG: cmd_line='" .. cmd_line .. "'")
+    
+    -- Find the start of the current word being completed
+    -- Walk backwards from cursor to find word boundary
+    local word_start = cmd_start + 1  -- Default to start of command
+    for i = col, cmd_start + 1, -1 do
+      local char = line:sub(i, i)
+      if char:match('%s') then
+        word_start = i + 1
+        break
+      end
+    end
+    
+    local result = word_start - 1  -- Convert to 0-based
+    print("DEBUG: returning findstart position=" .. result)
+    return result
+  else
+    print("DEBUG completion: base='" .. tostring(base) .. "'")
+    
+    -- Get the full command line to determine context
+    local line = vim.fn.getline('.')
+    local prompt_pos = line:find(vim.pesc(config.prompt), 1, true)
+    local cmd = ''
+    if prompt_pos and line:sub(1, #config.prompt) == config.prompt then
+      cmd = line:sub(#config.prompt + 1)
+    end
+    print("DEBUG: full command='" .. cmd .. "'")
+    
+    -- Check if we're completing the command name itself or arguments
+    local words = vim.split(cmd, '%s+', { trimempty = true })
+    if #words <= 1 and not cmd:match('%s$') then
+      -- We're still completing the command name, use base for command completion
+      print("DEBUG: completing command name with base='" .. (base or '') .. "'")
+      local completions = vim.fn.getcompletion(base or '', 'cmdline')
+      print("DEBUG: found " .. #completions .. " command completions")
+      return completions
+    else
+      -- We're completing arguments/files, use full command context
+      print("DEBUG: completing arguments with full command='" .. cmd .. "'")
+      local completions = vim.fn.getcompletion(cmd, 'cmdline')
+      print("DEBUG: found " .. #completions .. " argument completions")
+      return completions
+    end
+  end
+end
 
 -- Clean up autocmds when closing
 local function cleanup_focus_autocmd()
@@ -188,6 +271,11 @@ end
 -- Execute command
 local function execute_command(cmd)
   if cmd == '' then return end
+  
+  -- Close any active completion popups
+  if vim.fn.pumvisible() == 1 then
+    vim.cmd('pclose')
+  end
   
   -- Add to history
   add_to_history(cmd)
@@ -360,6 +448,9 @@ local function setup_terminal_keymaps()
   vim.keymap.set('i', '<Down>', function()
     navigate_history('down')
   end, { buffer = state.terminal_buf, silent = true })
+  
+  -- Ctrl-N for command completion
+  vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.terminal_buf, silent = true })
 end
 
 -- Setup mode-aware close handling
@@ -459,6 +550,10 @@ function M.open()
   -- Start in insert mode
   vim.cmd('startinsert!')
 end
+
+-- Expose completion function for v:lua access
+M.command_complete = command_complete
+_G.floating_cmdline_complete = command_complete
 
 -- Setup function
 function M.setup(opts)
