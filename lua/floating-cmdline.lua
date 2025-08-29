@@ -18,6 +18,8 @@ local state = {
   -- Store original context
   original_win = nil,
   original_buf = nil,
+  -- Track command execution to prevent autocmd interference
+  executing_command = false,
 }
 
 -- History file
@@ -236,6 +238,7 @@ end
 
 -- Close terminal window
 local function close_floating_cmdline()
+  
   if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
     vim.api.nvim_win_close(state.terminal_win, true)
     state.terminal_win = nil
@@ -283,17 +286,22 @@ end
 local function add_prompt()
   append_to_terminal({config.prompt})
   
-  -- Move cursor to end of prompt
+  -- Move cursor to end of prompt and ensure buffer is modifiable for new command
   if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
     local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
     local last_line = #lines
     vim.api.nvim_win_set_cursor(state.terminal_win, {last_line, #config.prompt})
+    -- Ensure buffer is modifiable since cursor is now on current command line
+    vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', true)
   end
 end
 
 -- Execute command
 local function execute_command(cmd)
   if cmd == '' then return end
+  
+  -- Mark that we're executing a command to prevent autocmd interference
+  state.executing_command = true
   
   -- Close any active completion popups
   if vim.fn.pumvisible() == 1 then
@@ -335,10 +343,10 @@ local function execute_command(cmd)
     return
   end
   
-  -- Capture command output with better isolation
+  -- Capture command output using vim.fn.execute for reliability
   local output = {}
   
-  -- Switch to original window first, then set up redirection
+  -- Switch to original window context for execution
   local current_win = vim.api.nvim_get_current_win()
   local target_win = state.original_win
   
@@ -346,63 +354,64 @@ local function execute_command(cmd)
     vim.api.nvim_set_current_win(target_win)
   end
   
-  -- Set up output redirection in the target context
-  vim.cmd('redir => g:floating_cmdline_output')
-  
-  -- Commands that might cause buffer conflicts - handle specially
-  local buffer_commands = {
-    '^e%s', '^edit%s', '^new%s*$', '^vnew%s*$', '^tabnew%s', 
-    '^sp%s', '^split%s', '^vs%s', '^vsplit%s', '^tabe%s', '^tabedit%s'
-  }
-  
-  local is_buffer_command = false
-  for _, pattern in ipairs(buffer_commands) do
-    if cmd:match(pattern) then
-      is_buffer_command = true
-      break
+  -- Execute command with appropriate method based on command type
+  local ok, result
+  if cmd:match('^[Ee]xplore?%s*') then
+    -- Explore: execute without output capture
+    ok, result = pcall(vim.cmd, cmd)
+  elseif cmd == 'ls' then
+    -- ls: use vim API to get buffer list instead of execute (which gets corrupted by Explore)
+    ok = true
+    result = ''
+    local buffers = vim.api.nvim_list_bufs()
+    for _, buf in ipairs(buffers) do
+      if vim.api.nvim_buf_is_loaded(buf) then
+        local name = vim.api.nvim_buf_get_name(buf)
+        if name == '' then name = '[No Name]' end
+        result = result .. string.format('%3d %%a   "%s"\n', buf, vim.fn.fnamemodify(name, ':~'))
+      end
     end
+  else
+    -- Other commands: execute normally
+    ok, result = pcall(vim.cmd, cmd)
   end
-  
-  local ok, result = pcall(function()
-    if is_buffer_command then
-      -- For buffer/file commands, don't use redir to avoid conflicts
-      vim.cmd('redir END')  -- End redir early
-      vim.cmd(cmd)
-      vim.cmd('redir => g:floating_cmdline_output')  -- Restart for any remaining output
-    else
-      -- For other commands, use silent to reduce autocmd interference  
-      vim.cmd('silent! ' .. cmd)
-    end
-  end)
-  
-  vim.cmd('redir END')
   
   -- Switch back to terminal window
   if current_win and vim.api.nvim_win_is_valid(current_win) then
     vim.api.nvim_set_current_win(current_win)
   end
   
-  local captured_output = vim.g.floating_cmdline_output or ''
-  vim.g.floating_cmdline_output = nil
-  
   if not ok then
     table.insert(output, 'Error: ' .. result)
-  elseif captured_output and captured_output ~= '' then
-    for line in captured_output:gmatch('[^\r\n]+') do
-      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-      if trimmed ~= '' then
-        table.insert(output, trimmed)
+  else
+    -- Process output based on command type
+    if cmd:match('^[Ee]xplore?%s*') then
+      -- Explore: no output processing (stays empty)
+    elseif cmd == 'ls' and result and result ~= '' then
+      -- ls: process the captured output
+      for line in result:gmatch('[^\r\n]+') do
+        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+        if trimmed ~= '' then
+          table.insert(output, trimmed)
+        end
       end
     end
   end
   
-  -- Append output to terminal
+  
+  -- Handle output and decide whether to stay open
   if #output > 0 then
+    -- Command had output, show it and stay open
     append_to_terminal(output)
+    add_prompt()
+  else
+    -- Command had no output, close the window for better UX
+    close_floating_cmdline()
+    vim.cmd('stopinsert')
   end
   
-  -- Add new prompt for next command
-  add_prompt()
+  -- Command execution finished
+  state.executing_command = false
 end
 
 -- Get current command from terminal buffer
@@ -476,11 +485,37 @@ local function setup_terminal_keymaps()
   vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.terminal_buf, silent = true })
 end
 
+-- Check if cursor is on the current command line and update buffer modifiable state
+local function update_buffer_modifiable()
+  if not state.terminal_buf or not vim.api.nvim_buf_is_valid(state.terminal_buf) then
+    return
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
+  local current_line = vim.fn.line('.')
+  local last_line = #lines
+  
+  -- Buffer should be modifiable only if cursor is on the last line (current command)
+  local should_be_modifiable = (current_line == last_line)
+  
+  vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', should_be_modifiable)
+end
+
 -- Setup mode-aware close handling
 local function setup_mode_autocmds()
   -- Create autocmd group
   local group = vim.api.nvim_create_augroup('FloatingCmdline', { clear = true })
   
+  -- Update buffer modifiable state on cursor movement and mode changes
+  vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'ModeChanged'}, {
+    group = group,
+    buffer = state.terminal_buf,
+    callback = function()
+      if not state.is_open then return end
+      update_buffer_modifiable()
+    end,
+  })
+
   -- Handle Esc, Ctrl+C, Ctrl+[ in normal mode to close
   vim.api.nvim_create_autocmd('ModeChanged', {
     group = group,
@@ -507,12 +542,31 @@ local function setup_mode_autocmds()
         vim.keymap.set('n', '<C-w>', function()
           close_floating_cmdline()
         end, { buffer = state.terminal_buf, silent = true, nowait = true })
+        
+        -- Handle insert mode keys - jump to current command instead of showing readonly error
+        local insert_keys = {'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'c', 'C'}
+        for _, key in ipairs(insert_keys) do
+          vim.keymap.set('n', key, function()
+            -- Jump to current command line (last line)
+            local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
+            local last_line = #lines
+            vim.api.nvim_win_set_cursor(state.terminal_win, {last_line, #config.prompt})
+            -- Enter insert mode at end of prompt
+            vim.cmd('startinsert!')
+          end, { buffer = state.terminal_buf, silent = true, nowait = true })
+        end
       else
         -- In insert mode, remove the normal mode keymaps to allow natural behavior
         pcall(vim.keymap.del, 'n', '<Esc>', { buffer = state.terminal_buf })
         pcall(vim.keymap.del, 'n', '<C-c>', { buffer = state.terminal_buf })
         pcall(vim.keymap.del, 'n', '<C-[>', { buffer = state.terminal_buf })
         pcall(vim.keymap.del, 'n', '<C-w>', { buffer = state.terminal_buf })
+        
+        -- Also remove insert mode key overrides
+        local insert_keys = {'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'c', 'C'}
+        for _, key in ipairs(insert_keys) do
+          pcall(vim.keymap.del, 'n', key, { buffer = state.terminal_buf })
+        end
       end
     end,
   })
@@ -532,6 +586,9 @@ local function setup_focus_autocmd()
       -- Delay the check slightly to allow command execution context switches
       vim.defer_fn(function()
         if not state.is_open then return end
+        
+        -- Don't close if we're in the middle of executing a command
+        if state.executing_command then return end
         
         local current_win = vim.api.nvim_get_current_win()
         
@@ -556,12 +613,14 @@ function M.open()
   state.original_win = vim.api.nvim_get_current_win()
   state.original_buf = vim.api.nvim_get_current_buf()
   
+  -- Reset state from any previous sessions
+  
   -- Create terminal buffer and window
   create_terminal_buffer()
   create_terminal_window()
   setup_terminal_keymaps()
   setup_mode_autocmds()
-  setup_focus_autocmd()
+  setup_focus_autocmd()  -- Re-enabled with smart command execution detection
   
   -- Reset state
   state.history_index = 0
