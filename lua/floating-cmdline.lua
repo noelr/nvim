@@ -144,37 +144,46 @@ end
 
 -- Custom completion function for command completion
 local function command_complete(findstart, base)
+  vim.cmd('echom "COMPLETION CALLED! findstart=' .. tostring(findstart) .. ', base=' .. tostring(base) .. '"')
+  
   if findstart == 1 then
     local line = vim.fn.getline('.')
     local col = vim.fn.col('.') - 1
     
-    print("DEBUG findstart: line='" .. line .. "', col=" .. col)
+    vim.cmd('echom "findstart: line=' .. line .. ', col=' .. col .. '"')
     
     -- Skip the prompt part - find where command actually starts
     local prompt_pos = line:find(vim.pesc(config.prompt), 1, true)
     if not prompt_pos then
-      print("DEBUG: no prompt found")
+      vim.cmd('echom "no prompt found"')
       return 0
     end
     
     local cmd_start = prompt_pos + #config.prompt - 1
     local cmd_line = line:sub(cmd_start + 1)
     
-    print("DEBUG: cmd_line='" .. cmd_line .. "'")
+    vim.cmd('echom "cmd_line=' .. cmd_line .. '"')
     
     -- Find the start of the current word being completed
     -- Walk backwards from cursor to find word boundary
+    vim.cmd('echom "searching word start col=' .. col .. ' cmd_start=' .. (cmd_start + 1) .. '"')
+    
     local word_start = cmd_start + 1  -- Default to start of command
     for i = col, cmd_start + 1, -1 do
       local char = line:sub(i, i)
+      vim.cmd('echom "pos ' .. i .. ' char=' .. char .. '"')
       if char:match('%s') then
         word_start = i + 1
+        vim.cmd('echom "found space at ' .. i .. ' word_start=' .. word_start .. '"')
         break
       end
     end
     
+    vim.cmd('echom "final word_start=' .. word_start .. '"')
+    vim.cmd('echom "word=' .. line:sub(word_start, col) .. '"')
+    
     local result = word_start - 1  -- Convert to 0-based
-    print("DEBUG: returning findstart position=" .. result)
+    vim.cmd('echom "returning findstart=' .. result .. '"')
     return result
   else
     print("DEBUG completion: base='" .. tostring(base) .. "'")
@@ -186,7 +195,9 @@ local function command_complete(findstart, base)
     if prompt_pos and line:sub(1, #config.prompt) == config.prompt then
       cmd = line:sub(#config.prompt + 1)
     end
-    print("DEBUG: full command='" .. cmd .. "'")
+    vim.cmd('echom "full command=' .. cmd .. '"')
+    vim.cmd('echom "prompt=' .. config.prompt .. ' len=' .. #config.prompt .. '"')
+    vim.cmd('echom "line=' .. line .. ' extract from pos=' .. (#config.prompt + 1) .. '"')
     
     -- Check if we're completing the command name itself or arguments
     local words = vim.split(cmd, '%s+', { trimempty = true })
@@ -197,10 +208,28 @@ local function command_complete(findstart, base)
       print("DEBUG: found " .. #completions .. " command completions")
       return completions
     else
-      -- We're completing arguments/files, use full command context
-      print("DEBUG: completing arguments with full command='" .. cmd .. "'")
-      local completions = vim.fn.getcompletion(cmd, 'cmdline')
-      print("DEBUG: found " .. #completions .. " argument completions")
+      -- We're completing arguments/files
+      vim.cmd('echom "completing arguments base=' .. (base or '') .. '"')
+      
+      -- Build the context for completion: command + partial word
+      local context = cmd:gsub('%s*' .. vim.pesc(base or '') .. '%s*$', ' ' .. (base or ''))
+      vim.cmd('echom "completion context=' .. context .. '"')
+      
+      local completions = vim.fn.getcompletion(context, 'cmdline')
+      vim.cmd('echom "found ' .. #completions .. ' completions"')
+      
+      -- Filter completions to only those that start with base
+      if base and base ~= '' then
+        local filtered = {}
+        for _, comp in ipairs(completions) do
+          if comp:sub(1, #base):lower() == base:lower() then
+            table.insert(filtered, comp)
+          end
+        end
+        vim.cmd('echom "filtered to ' .. #filtered .. ' matching completions"')
+        return filtered
+      end
+      
       return completions
     end
   end
@@ -554,6 +583,8 @@ end
 -- Expose completion function for v:lua access
 M.command_complete = command_complete
 _G.floating_cmdline_complete = command_complete
+
+vim.notify("SETUP: Global completion function registered")
 
 -- Setup function
 function M.setup(opts)
