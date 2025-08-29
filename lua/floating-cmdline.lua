@@ -354,27 +354,11 @@ local function execute_command(cmd)
     vim.api.nvim_set_current_win(target_win)
   end
   
-  -- Execute command with appropriate method based on command type
-  local ok, result
-  if cmd:match('^[Ee]xplore?%s*') then
-    -- Explore: execute without output capture
-    ok, result = pcall(vim.cmd, cmd)
-  elseif cmd == 'ls' then
-    -- ls: use vim API to get buffer list instead of execute (which gets corrupted by Explore)
-    ok = true
-    result = ''
-    local buffers = vim.api.nvim_list_bufs()
-    for _, buf in ipairs(buffers) do
-      if vim.api.nvim_buf_is_loaded(buf) then
-        local name = vim.api.nvim_buf_get_name(buf)
-        if name == '' then name = '[No Name]' end
-        result = result .. string.format('%3d %%a   "%s"\n', buf, vim.fn.fnamemodify(name, ':~'))
-      end
-    end
-  else
-    -- Other commands: execute normally
-    ok, result = pcall(vim.cmd, cmd)
-  end
+  -- Check if this is Explore command
+  local is_explore = cmd:match('^[Ee]xplore?%s*')
+  
+  -- Execute command
+  local ok, result = pcall(vim.fn.execute, cmd)
   
   -- Switch back to terminal window
   if current_win and vim.api.nvim_win_is_valid(current_win) then
@@ -383,17 +367,12 @@ local function execute_command(cmd)
   
   if not ok then
     table.insert(output, 'Error: ' .. result)
-  else
-    -- Process output based on command type
-    if cmd:match('^[Ee]xplore?%s*') then
-      -- Explore: no output processing (stays empty)
-    elseif cmd == 'ls' and result and result ~= '' then
-      -- ls: process the captured output
-      for line in result:gmatch('[^\r\n]+') do
-        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-        if trimmed ~= '' then
-          table.insert(output, trimmed)
-        end
+  elseif not is_explore and result and result ~= '' then
+    -- Process captured output (skip for Explore)
+    for line in result:gmatch('[^\r\n]+') do
+      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+      if trimmed ~= '' then
+        table.insert(output, trimmed)
       end
     end
   end
