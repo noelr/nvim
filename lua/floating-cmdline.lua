@@ -3,23 +3,33 @@ local M = {}
 -- Configuration
 local config = {
   width_ratio = 0.8,  -- Width relative to screen
-  height_ratio = 0.6, -- Height relative to screen
+  height_ratio = 0.6, -- Height relative to screen for output window
   border = 'rounded', -- Border style
-  prompt = '> ',      -- Command prompt
 }
 
 -- State
 local state = {
-  terminal_buf = nil,
-  terminal_win = nil,
+  -- Prompt window
+  prompt_buf = nil,
+  prompt_win = nil,
+  
+  -- Output window
+  output_buf = nil,
+  output_win = nil,
+  
   is_open = false,
   command_history = {},
   history_index = 0,
+  
   -- Store original context
   original_win = nil,
   original_buf = nil,
-  -- Track command execution to prevent autocmd interference
-  executing_command = false,
+  
+  -- Message capture
+  message_capture_active = false,
+  original_functions = {},
+  message_count = 0,
+  command_execution_timer = nil,
 }
 
 -- History file
@@ -68,80 +78,197 @@ local function add_to_history(cmd)
   save_history()
 end
 
--- Get window dimensions and position
-local function get_window_config()
+-- Get window dimensions and positions for both windows
+local function get_window_configs()
   local screen_width = vim.o.columns
   local screen_height = vim.o.lines
   
   local width = math.floor(screen_width * config.width_ratio)
-  local height = math.floor(screen_height * config.height_ratio)
+  local output_height = math.floor(screen_height * config.height_ratio)
+  local prompt_height = 1  -- Single line for prompt
   
   local col = math.floor((screen_width - width) / 2)
-  local row = math.floor((screen_height - height) / 2)
+  local output_row = math.floor((screen_height - output_height - prompt_height - 1) / 2)
+  local prompt_row = output_row + output_height + 1
   
   return {
-    width = width,
-    height = height,
-    col = col,
-    row = row,
+    prompt = {
+      width = width,
+      height = prompt_height,
+      col = col,
+      row = prompt_row,
+    },
+    output = {
+      width = width,
+      height = output_height,
+      col = col,
+      row = output_row,
+    }
   }
 end
 
--- Create terminal buffer
-local function create_terminal_buffer()
-  state.terminal_buf = vim.api.nvim_create_buf(false, true)
+-- Create output buffer
+local function create_output_buffer()
+  state.output_buf = vim.api.nvim_create_buf(false, true)
   
-  -- Use vim filetype to enable command completion
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'filetype', 'vim')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'bufhidden', 'wipe')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'swapfile', false)
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'buflisted', false)
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', true)
+  vim.api.nvim_buf_set_option(state.output_buf, 'buftype', 'nofile')
+  vim.api.nvim_buf_set_option(state.output_buf, 'bufhidden', 'wipe')
+  vim.api.nvim_buf_set_option(state.output_buf, 'swapfile', false)
+  vim.api.nvim_buf_set_option(state.output_buf, 'buflisted', false)
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)  -- Read-only
   
-  -- Set up custom command completion
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'completefunc', 'v:lua.floating_cmdline_complete')
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'omnifunc', '')
-  
-  -- Disable Copilot for this buffer
-  vim.api.nvim_buf_set_var(state.terminal_buf, 'copilot_enabled', false)
-  
-  -- Create autocmd to disable LSP for this specific buffer
-  vim.api.nvim_create_autocmd({'BufEnter', 'BufWinEnter'}, {
-    buffer = state.terminal_buf,
-    callback = function()
-      -- Disable LSP clients for this buffer
-      local clients = vim.lsp.get_active_clients({ bufnr = state.terminal_buf })
-      for _, client in ipairs(clients) do
-        vim.lsp.buf_detach_client(state.terminal_buf, client.id)
-      end
-    end,
-    once = false,
-  })
-  
-  -- Set a unique buffer name to avoid conflicts
-  vim.api.nvim_buf_set_name(state.terminal_buf, '[Floating Command Terminal]')
+  vim.api.nvim_buf_set_name(state.output_buf, '[Command Output]')
 end
 
--- Create floating terminal window
-local function create_terminal_window()
-  local win_config = get_window_config()
+-- Create prompt buffer
+local function create_prompt_buffer()
+  state.prompt_buf = vim.api.nvim_create_buf(false, true)
   
-  state.terminal_win = vim.api.nvim_open_win(state.terminal_buf, true, {
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'buftype', 'nofile')
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'filetype', 'vim')  -- For command completion
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'bufhidden', 'wipe')
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'swapfile', false)
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'buflisted', false)
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'modifiable', true)
+  
+  -- Set up custom command completion
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'completefunc', 'v:lua.floating_cmdline_complete')
+  
+  -- Disable Copilot for this buffer
+  vim.api.nvim_buf_set_var(state.prompt_buf, 'copilot_enabled', false)
+  
+  vim.api.nvim_buf_set_name(state.prompt_buf, '[Command Prompt]')
+end
+
+-- Create floating windows
+local function create_windows()
+  local configs = get_window_configs()
+  
+  -- Create output window first (appears above prompt)
+  state.output_win = vim.api.nvim_open_win(state.output_buf, false, {
     relative = 'editor',
-    width = win_config.width,
-    height = win_config.height,
-    row = win_config.row,
-    col = win_config.col,
+    width = configs.output.width,
+    height = configs.output.height,
+    row = configs.output.row,
+    col = configs.output.col,
     border = config.border,
-    title = ' Terminal Command ',
+    title = ' Output ',
     title_pos = 'center',
   })
   
-  -- Set window options
-  vim.api.nvim_win_set_option(state.terminal_win, 'winhl', 'Normal:Normal,FloatBorder:FloatBorder')
-  vim.api.nvim_win_set_option(state.terminal_win, 'wrap', true)
-  vim.api.nvim_win_set_option(state.terminal_win, 'scrolloff', 0)
+  -- Output window options
+  vim.api.nvim_win_set_option(state.output_win, 'wrap', true)
+  vim.api.nvim_win_set_option(state.output_win, 'scrolloff', 0)
+  
+  -- Create prompt window (appears below output, gets focus)
+  state.prompt_win = vim.api.nvim_open_win(state.prompt_buf, true, {
+    relative = 'editor',
+    width = configs.prompt.width,
+    height = configs.prompt.height,
+    row = configs.prompt.row,
+    col = configs.prompt.col,
+    border = config.border,
+    title = ' Command ',
+    title_pos = 'center',
+  })
+  
+  -- Prompt window options
+  vim.api.nvim_win_set_option(state.prompt_win, 'wrap', false)
+  vim.api.nvim_win_set_option(state.prompt_win, 'scrolloff', 0)
+end
+
+-- Append output to output buffer
+local function append_to_output(lines)
+  if not state.output_buf or not vim.api.nvim_buf_is_valid(state.output_buf) then
+    return
+  end
+  
+  -- Make buffer temporarily modifiable
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
+  
+  -- Get current content
+  local current_lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
+  
+  -- Append new lines
+  for _, line in ipairs(lines) do
+    table.insert(current_lines, line)
+  end
+  
+  -- Update buffer
+  vim.api.nvim_buf_set_lines(state.output_buf, 0, -1, false, current_lines)
+  
+  -- Make buffer read-only again
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+  
+  -- Scroll to bottom if window is valid
+  if state.output_win and vim.api.nvim_win_is_valid(state.output_win) then
+    local line_count = #current_lines
+    vim.api.nvim_win_set_cursor(state.output_win, {line_count, 0})
+  end
+end
+
+-- Clear prompt buffer
+local function clear_prompt()
+  if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
+    vim.api.nvim_buf_set_lines(state.prompt_buf, 0, -1, false, {''})
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_win_set_cursor(state.prompt_win, {1, 0})
+    end
+  end
+end
+
+-- Start capturing messages by hooking into nvim_echo
+local function start_message_capture()
+  if state.message_capture_active then
+    return -- Already active
+  end
+  
+  -- Reset message counter for new command
+  state.message_count = 0
+  
+  -- Store original functions
+  state.original_functions.nvim_echo = vim.api.nvim_echo
+  
+  -- Hook into nvim_echo
+  vim.api.nvim_echo = function(chunks, history, opts)
+    -- Safely capture messages
+    local ok = pcall(function()
+      if state.is_open then
+        for _, chunk in ipairs(chunks) do
+          local text = chunk[1]
+          if text and text ~= '' then
+            -- Trim whitespace and check if empty
+            local trimmed = text:gsub('^%s*(.-)%s*$', '%1')
+            -- Filter out empty lines and whitespace-only
+            if trimmed ~= '' then
+              append_to_output({'  [Message] ' .. trimmed})
+              state.message_count = state.message_count + 1
+            end
+          end
+        end
+      end
+    end)
+    
+    -- Always call original function, even if our code fails
+    return state.original_functions.nvim_echo(chunks, history, opts)
+  end
+  
+  state.message_capture_active = true
+end
+
+-- Stop capturing messages and restore original functions
+local function stop_message_capture()
+  if not state.message_capture_active then
+    return -- Not active
+  end
+  
+  -- Restore original functions
+  if state.original_functions.nvim_echo then
+    vim.api.nvim_echo = state.original_functions.nvim_echo
+    state.original_functions.nvim_echo = nil
+  end
+  
+  state.message_capture_active = false
 end
 
 -- Custom completion function for command completion
@@ -150,203 +277,105 @@ local function command_complete(findstart, base)
     local line = vim.fn.getline('.')
     local col = vim.fn.col('.') - 1
     
-    -- Skip the prompt part - find where command actually starts
-    local prompt_pos = line:find(vim.pesc(config.prompt), 1, true)
-    if not prompt_pos then
+    -- Check if this is a file completion context (command + space + something)
+    local has_space = line:find('%s')
+    
+    if has_space then
+      -- We're completing arguments/files
+      local file_commands = { 'e', 'edit', 'sp', 'split', 'vs', 'vsplit', 'tabe', 'tabedit' }
+      local first_word = line:match('^(%S+)')
+      local is_file_completion = false
+      
+      if first_word then
+        for _, cmd in ipairs(file_commands) do
+          if first_word == cmd then
+            is_file_completion = true
+            break
+          end
+        end
+      end
+      
+      -- Find start of current word being completed
+      local word_start = col
+      for i = col, 0, -1 do
+        local char = line:sub(i, i)
+        if is_file_completion then
+          -- For files, only break on spaces
+          if char:match('%s') then
+            word_start = i
+            break
+          end
+        else
+          -- For other completions, break on spaces or special chars
+          if char:match('%s') then
+            word_start = i
+            break
+          end
+        end
+        word_start = i - 1
+      end
+      
+      return word_start
+    else
+      -- We're completing the command name itself
+      -- Start from beginning of line
       return 0
     end
-    
-    local cmd_start = prompt_pos + #config.prompt - 1
-    local cmd_line = line:sub(cmd_start + 1)
-    
-    -- Find the start of the current word being completed
-    -- Different logic for file completion vs other completion
-    
-    -- Check if this is a file completion command
-    local file_commands = { 'e', 'edit', 'sp', 'split', 'vs', 'vsplit', 'tabe', 'tabedit', 'new', 'vnew' }
-    local first_word = cmd_line:match('^(%S+)')
-    local is_file_completion = false
-    for _, cmd in ipairs(file_commands) do
-      if first_word == cmd then
-        is_file_completion = true
-        break
-      end
-    end
-    
-    local word_start = cmd_start + 1  -- Default to start of command
-    for i = col, cmd_start + 1, -1 do
-      local char = line:sub(i, i)
-      
-      -- For file completion, only spaces are word boundaries (not /)
-      -- For other completion, both spaces and other chars can be boundaries
-      if char:match('%s') or (not is_file_completion and char:match('%W')) then
-        word_start = i + 1
-        break
-      end
-    end
-    
-    local result = word_start - 1  -- Convert to 0-based
-    return result
   else
-    -- Get the full command line to determine context
+    -- Get the full command line
     local line = vim.fn.getline('.')
-    local prompt_pos = line:find(vim.pesc(config.prompt), 1, true)
-    local cmd = ''
-    if prompt_pos and line:sub(1, #config.prompt) == config.prompt then
-      cmd = line:sub(#config.prompt + 1)
-    end
     
-    -- Check if we're completing the command name itself or arguments
-    local words = vim.split(cmd, '%s+', { trimempty = true })
-    if #words <= 1 and not cmd:match('%s$') then
-      -- We're still completing the command name, use base for command completion
+    -- Check if we're completing command or arguments
+    local has_space = line:find('%s')
+    
+    if not has_space then
+      -- Completing command name - use base which has the partial text
       local completions = vim.fn.getcompletion(base or '', 'cmdline')
       return completions
     else
-      -- We're completing arguments/files
+      -- Completing arguments
+      -- Get everything before the current word
+      local words = vim.split(line, '%s+', { trimempty = true })
       
-      -- Build the context for completion: command + partial word
-      -- If cmd doesn't contain the base, we need to reconstruct it
-      local context = cmd
-      if base and base ~= '' and not cmd:find(vim.pesc(base), 1, true) then
-        -- The base is not in cmd, so reconstruct the full command
-        context = cmd:gsub('%s+$', '') .. ' ' .. base
-      end
-      
-      local completions = vim.fn.getcompletion(context, 'cmdline')
-      
-      -- Filter completions to only those that start with base
-      if base and base ~= '' then
-        local filtered = {}
-        for _, comp in ipairs(completions) do
-          if comp:sub(1, #base):lower() == base:lower() then
-            table.insert(filtered, comp)
-          end
+      if #words == 1 then
+        -- Just command + space, completing first argument
+        local context = words[1] .. ' ' .. (base or '')
+        local completions = vim.fn.getcompletion(context, 'cmdline')
+        return completions
+      else
+        -- Multiple words, build full context
+        local context = line
+        if base and base ~= '' and not line:find(vim.pesc(base) .. '$') then
+          -- If base is not at the end of line, we need to add it
+          context = line .. base
         end
-        return filtered
+        local completions = vim.fn.getcompletion(context, 'cmdline')
+        return completions
       end
-      
-      return completions
     end
   end
 end
 
--- Clean up autocmds when closing
-local function cleanup_focus_autocmd()
-  pcall(vim.api.nvim_del_augroup_by_name, 'FloatingCmdline')
-end
 
--- Close terminal window
-local function close_floating_cmdline()
-  
-  if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
-    vim.api.nvim_win_close(state.terminal_win, true)
-    state.terminal_win = nil
-  end
-  
-  -- Clean up terminal buffer explicitly to prevent conflicts
-  if state.terminal_buf and vim.api.nvim_buf_is_valid(state.terminal_buf) then
-    vim.api.nvim_buf_delete(state.terminal_buf, { force = true })
-    state.terminal_buf = nil
-  end
-  
-  cleanup_focus_autocmd()
-  
-  -- Reset all state
-  state.is_open = false
-  state.original_win = nil
-  state.original_buf = nil
-end
-
--- Append output to terminal buffer
-local function append_to_terminal(lines)
-  if not state.terminal_buf or not vim.api.nvim_buf_is_valid(state.terminal_buf) then
-    return
-  end
-  
-  -- Get current buffer content
-  local current_lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-  
-  -- Append new lines
-  for _, line in ipairs(lines) do
-    table.insert(current_lines, line)
-  end
-  
-  -- Update buffer
-  vim.api.nvim_buf_set_lines(state.terminal_buf, 0, -1, false, current_lines)
-  
-  -- Scroll to bottom
-  if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
-    local line_count = #current_lines
-    vim.api.nvim_win_set_cursor(state.terminal_win, {line_count, 0})
-  end
-end
-
--- Add new prompt line
-local function add_prompt()
-  append_to_terminal({config.prompt})
-  
-  -- Move cursor to end of prompt and ensure buffer is modifiable for new command
-  if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
-    local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-    local last_line = #lines
-    vim.api.nvim_win_set_cursor(state.terminal_win, {last_line, #config.prompt})
-    -- Ensure buffer is modifiable since cursor is now on current command line
-    vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', true)
-  end
-end
 
 -- Execute command
 local function execute_command(cmd)
-  if cmd == '' then return end
   
-  -- Mark that we're executing a command to prevent autocmd interference
-  state.executing_command = true
-  
-  -- Close any active completion popups
+  -- Close any open completion popup
   if vim.fn.pumvisible() == 1 then
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-e>', true, false, true), 'n', false)
   end
   
   -- Add to history
   add_to_history(cmd)
   
-  -- Commands that should close the floating cmdline immediately
-  local immediate_commands = {
-    'q', 'quit', 'qa', 'qall', 'wq', 'wqa', 'wqall', 'x', 'exit',
-    'cq', 'cquit', 'bd', 'bdelete', 'bw', 'bwipeout'
-  }
+  -- Show command in output
+  append_to_output({'> ' .. cmd})
   
-  local should_close_immediately = false
-  for _, immediate_cmd in ipairs(immediate_commands) do
-    if cmd:match('^' .. immediate_cmd .. '%s*$') or cmd:match('^' .. immediate_cmd .. '!%s*$') then
-      should_close_immediately = true
-      break
-    end
-  end
+  -- Start capturing messages for this command
+  start_message_capture()
   
-  if should_close_immediately then
-    close_floating_cmdline()
-    vim.cmd('stopinsert')
-    
-    -- Execute the command
-    local ok, err = pcall(function()
-      if state.original_win and vim.api.nvim_win_is_valid(state.original_win) then
-        vim.api.nvim_set_current_win(state.original_win)
-      end
-      vim.cmd(cmd)
-    end)
-    
-    if not ok then
-      vim.api.nvim_err_writeln('Error: ' .. err)
-    end
-    return
-  end
-  
-  -- Capture command output using vim.fn.execute for reliability
-  local output = {}
-  
-  -- Switch to original window context for execution
+  -- Store original context
   local current_win = vim.api.nvim_get_current_win()
   local target_win = state.original_win
   
@@ -354,82 +383,71 @@ local function execute_command(cmd)
     vim.api.nvim_set_current_win(target_win)
   end
   
-  -- Check if this is Explore command
-  local is_explore = cmd:match('^[Ee]xplore?%s*')
-  
-  -- Execute command
+  -- Execute command and capture output
   local ok, result = pcall(vim.fn.execute, cmd)
   
-  -- Switch back to terminal window
-  if current_win and vim.api.nvim_win_is_valid(current_win) then
-    vim.api.nvim_set_current_win(current_win)
-  end
+  -- Count immediate output lines
+  local immediate_output_count = 0
   
+  -- Process immediate output
   if not ok then
-    table.insert(output, 'Error: ' .. result)
-  elseif not is_explore and result and result ~= '' then
-    -- Process captured output (skip for Explore)
-    for line in result:gmatch('[^\r\n]+') do
-      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-      if trimmed ~= '' then
-        table.insert(output, trimmed)
+    append_to_output({'Error: ' .. result})
+    immediate_output_count = 1
+  elseif result and result ~= '' then
+    -- Skip output for Explore command (produces noise)
+    local is_explore = cmd:match('^[Ee]xplore?%s*')
+    if not is_explore then
+      for line in result:gmatch('[^\r\n]+') do
+        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+        if trimmed ~= '' then
+          append_to_output({'  ' .. trimmed})
+          immediate_output_count = immediate_output_count + 1
+        end
       end
     end
   end
   
-  
-  -- Handle output and decide whether to stay open
-  if #output > 0 then
-    -- Command had output, show it and stay open
-    append_to_terminal(output)
-    add_prompt()
-  else
-    -- Command had no output, close the window for better UX
-    close_floating_cmdline()
-    vim.cmd('stopinsert')
+  -- Switch back to prompt window
+  if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+    vim.api.nvim_set_current_win(state.prompt_win)
+    clear_prompt()
   end
   
-  -- Command execution finished
-  state.executing_command = false
+  -- Keep window open and continue capturing messages
+  vim.defer_fn(function()
+    -- Add separator and stop capture after delay
+    append_to_output({''})
+    stop_message_capture()
+  end, 2000) -- Continue capturing for 2 seconds
 end
 
--- Get current command from terminal buffer
+-- Get current command from prompt
 local function get_current_command()
-  if not state.terminal_buf or not vim.api.nvim_buf_is_valid(state.terminal_buf) then
+  if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then
     return ''
   end
   
-  local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-  local last_line = lines[#lines] or ''
-  
-  -- Extract command after the prompt
-  if last_line:sub(1, #config.prompt) == config.prompt then
-    return last_line:sub(#config.prompt + 1)
-  end
-  
-  return ''
+  local lines = vim.api.nvim_buf_get_lines(state.prompt_buf, 0, -1, false)
+  local cmd = lines[1] or ''
+  -- Trim whitespace
+  return cmd:gsub('^%s*(.-)%s*$', '%1')
 end
 
--- Replace current command line
+-- Replace current command in prompt
 local function replace_current_command(cmd)
-  if not state.terminal_buf or not vim.api.nvim_buf_is_valid(state.terminal_buf) then
+  if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then
     return
   end
   
-  local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-  if #lines == 0 then return end
-  
-  -- Replace the last line with prompt + command
-  lines[#lines] = config.prompt .. cmd
-  vim.api.nvim_buf_set_lines(state.terminal_buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_lines(state.prompt_buf, 0, -1, false, {cmd})
   
   -- Move cursor to end
-  if state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) then
-    vim.api.nvim_win_set_cursor(state.terminal_win, {#lines, #lines[#lines]})
+  if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+    vim.api.nvim_win_set_cursor(state.prompt_win, {1, #cmd})
   end
 end
 
--- Handle command history
+-- Handle command history navigation
 local function navigate_history(direction)
   if #state.command_history == 0 then return end
   
@@ -443,170 +461,109 @@ local function navigate_history(direction)
   replace_current_command(cmd)
 end
 
--- Set up terminal buffer keymaps
-local function setup_terminal_keymaps()
+-- Setup keymaps for prompt buffer
+local function setup_prompt_keymaps()
   -- Enter to execute command
   vim.keymap.set('i', '<CR>', function()
-    local cmd = get_current_command()
-    execute_command(cmd)
-  end, { buffer = state.terminal_buf, silent = true })
+    -- Accept completion if popup is open
+    if vim.fn.pumvisible() == 1 then
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
+      -- Wait for completion to be inserted, then execute
+      vim.defer_fn(function()
+        local cmd = get_current_command()
+        if cmd ~= '' then
+          execute_command(cmd)
+        end
+      end, 10)
+    else
+      -- No popup, execute immediately
+      local cmd = get_current_command()
+      if cmd ~= '' then
+        execute_command(cmd)
+      end
+    end
+  end, { buffer = state.prompt_buf, silent = true })
   
-  -- Arrow keys for history navigation
+  -- History navigation
   vim.keymap.set('i', '<Up>', function()
     navigate_history('up')
-  end, { buffer = state.terminal_buf, silent = true })
+  end, { buffer = state.prompt_buf, silent = true })
   
   vim.keymap.set('i', '<Down>', function()
     navigate_history('down')
-  end, { buffer = state.terminal_buf, silent = true })
+  end, { buffer = state.prompt_buf, silent = true })
   
-  -- Ctrl-N for command completion
-  vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.terminal_buf, silent = true })
+  -- Ctrl-N for completion
+  vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.prompt_buf, silent = true })
+  
+  
+  -- C-c to close in normal mode
+  vim.keymap.set('n', '<C-c>', function()
+    M.close()
+  end, { buffer = state.prompt_buf, silent = true })
 end
 
--- Check if cursor is on the current command line and update buffer modifiable state
-local function update_buffer_modifiable()
-  if not state.terminal_buf or not vim.api.nvim_buf_is_valid(state.terminal_buf) then
-    return
+-- Close floating command line
+function M.close()
+  -- Clean up any running timer
+  if state.command_execution_timer then
+    state.command_execution_timer:stop()
+    state.command_execution_timer:close()
+    state.command_execution_timer = nil
   end
   
-  local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-  local current_line = vim.fn.line('.')
-  local last_line = #lines
+  -- Stop message capture first
+  stop_message_capture()
   
-  -- Buffer should be modifiable only if cursor is on the last line (current command)
-  local should_be_modifiable = (current_line == last_line)
+  if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+    vim.api.nvim_win_close(state.prompt_win, true)
+    state.prompt_win = nil
+  end
   
-  vim.api.nvim_buf_set_option(state.terminal_buf, 'modifiable', should_be_modifiable)
-end
-
--- Setup mode-aware close handling
-local function setup_mode_autocmds()
-  -- Create autocmd group
-  local group = vim.api.nvim_create_augroup('FloatingCmdline', { clear = true })
+  if state.output_win and vim.api.nvim_win_is_valid(state.output_win) then
+    vim.api.nvim_win_close(state.output_win, true)
+    state.output_win = nil
+  end
   
-  -- Update buffer modifiable state on cursor movement and mode changes
-  vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'ModeChanged'}, {
-    group = group,
-    buffer = state.terminal_buf,
-    callback = function()
-      if not state.is_open then return end
-      update_buffer_modifiable()
-    end,
-  })
-
-  -- Handle Esc, Ctrl+C, Ctrl+[ in normal mode to close
-  vim.api.nvim_create_autocmd('ModeChanged', {
-    group = group,
-    buffer = state.terminal_buf,
-    callback = function()
-      if not state.is_open then return end
-      
-      local mode = vim.api.nvim_get_mode().mode
-      if mode == 'n' then
-        -- In normal mode, set up keymaps to close on escape keys
-        vim.keymap.set('n', '<Esc>', function()
-          close_floating_cmdline()
-        end, { buffer = state.terminal_buf, silent = true, nowait = true })
-        
-        vim.keymap.set('n', '<C-c>', function()
-          close_floating_cmdline()
-        end, { buffer = state.terminal_buf, silent = true, nowait = true })
-        
-        vim.keymap.set('n', '<C-[>', function()
-          close_floating_cmdline()
-        end, { buffer = state.terminal_buf, silent = true, nowait = true })
-        
-        -- Also handle Ctrl+W for window navigation (should close)
-        vim.keymap.set('n', '<C-w>', function()
-          close_floating_cmdline()
-        end, { buffer = state.terminal_buf, silent = true, nowait = true })
-        
-        -- Handle insert mode keys - jump to current command instead of showing readonly error
-        local insert_keys = {'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'c', 'C'}
-        for _, key in ipairs(insert_keys) do
-          vim.keymap.set('n', key, function()
-            -- Jump to current command line (last line)
-            local lines = vim.api.nvim_buf_get_lines(state.terminal_buf, 0, -1, false)
-            local last_line = #lines
-            vim.api.nvim_win_set_cursor(state.terminal_win, {last_line, #config.prompt})
-            -- Enter insert mode at end of prompt
-            vim.cmd('startinsert!')
-          end, { buffer = state.terminal_buf, silent = true, nowait = true })
-        end
-      else
-        -- In insert mode, remove the normal mode keymaps to allow natural behavior
-        pcall(vim.keymap.del, 'n', '<Esc>', { buffer = state.terminal_buf })
-        pcall(vim.keymap.del, 'n', '<C-c>', { buffer = state.terminal_buf })
-        pcall(vim.keymap.del, 'n', '<C-[>', { buffer = state.terminal_buf })
-        pcall(vim.keymap.del, 'n', '<C-w>', { buffer = state.terminal_buf })
-        
-        -- Also remove insert mode key overrides
-        local insert_keys = {'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'c', 'C'}
-        for _, key in ipairs(insert_keys) do
-          pcall(vim.keymap.del, 'n', key, { buffer = state.terminal_buf })
-        end
-      end
-    end,
-  })
-end
-
--- Setup autocmd to close when focus leaves our window
-local function setup_focus_autocmd()
-  -- Get or create autocmd group
-  local group = vim.api.nvim_create_augroup('FloatingCmdline', { clear = false })
+  if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
+    vim.api.nvim_buf_delete(state.prompt_buf, { force = true })
+    state.prompt_buf = nil
+  end
   
-  -- Monitor window enter events with a delay to avoid closing during command execution
-  vim.api.nvim_create_autocmd('WinEnter', {
-    group = group,
-    callback = function()
-      if not state.is_open then return end
-      
-      -- Delay the check slightly to allow command execution context switches
-      vim.defer_fn(function()
-        if not state.is_open then return end
-        
-        -- Don't close if we're in the middle of executing a command
-        if state.executing_command then return end
-        
-        local current_win = vim.api.nvim_get_current_win()
-        
-        -- Check if current window is our terminal window
-        local is_our_window = state.terminal_win and vim.api.nvim_win_is_valid(state.terminal_win) and current_win == state.terminal_win
-        
-        -- If focus moved to a window that's not ours, close the floating cmdline
-        if not is_our_window then
-          close_floating_cmdline()
-          vim.cmd('stopinsert')
-        end
-      end, 50) -- 50ms delay
-    end,
-  })
+  if state.output_buf and vim.api.nvim_buf_is_valid(state.output_buf) then
+    vim.api.nvim_buf_delete(state.output_buf, { force = true })
+    state.output_buf = nil
+  end
+  
+  state.is_open = false
+  state.original_win = nil
+  state.original_buf = nil
 end
 
 -- Open floating command line
 function M.open()
   if state.is_open then return end
   
-  -- Store original window and buffer context
+  -- Store original context
   state.original_win = vim.api.nvim_get_current_win()
   state.original_buf = vim.api.nvim_get_current_buf()
   
-  -- Reset state from any previous sessions
+  -- Create buffers
+  create_output_buffer()
+  create_prompt_buffer()
   
-  -- Create terminal buffer and window
-  create_terminal_buffer()
-  create_terminal_window()
-  setup_terminal_keymaps()
-  setup_mode_autocmds()
-  setup_focus_autocmd()  -- Re-enabled with smart command execution detection
+  -- Create windows
+  create_windows()
   
-  -- Reset state
+  -- Setup keymaps
+  setup_prompt_keymaps()
+  
+  -- Reset history navigation
   state.history_index = 0
   state.is_open = true
   
-  -- Initialize terminal with first prompt
-  add_prompt()
+  -- Initialize prompt
+  clear_prompt()
   
   -- Start in insert mode
   vim.cmd('startinsert!')
