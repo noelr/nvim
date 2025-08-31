@@ -461,6 +461,58 @@ local function navigate_history(direction)
   replace_current_command(cmd)
 end
 
+-- Toggle between prompt and output windows
+local function toggle_between_windows()
+  local current_win = vim.api.nvim_get_current_win()
+  
+  if current_win == state.prompt_win then
+    -- Switch to output window
+    if state.output_win and vim.api.nvim_win_is_valid(state.output_win) then
+      vim.api.nvim_set_current_win(state.output_win)
+    end
+  elseif current_win == state.output_win then
+    -- Switch to prompt window
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+    end
+  end
+end
+
+-- Handle window navigation commands (C-w prefix)
+local function handle_window_command()
+  -- Get the next character after C-w
+  local char = vim.fn.getchar()
+  local key = type(char) == 'number' and vim.fn.nr2char(char) or char
+  
+  local current_win = vim.api.nvim_get_current_win()
+  
+  -- Handle different window commands
+  if key == 'w' or key == '\23' then  -- C-w w or C-w C-w (\23 is Ctrl-W)
+    toggle_between_windows()
+  elseif key == 'W' then  -- C-w W (cycle backwards)
+    toggle_between_windows()
+  elseif key == 'h' or key == 'j' or key == 'k' or key == 'l' then
+    -- Directional navigation - simplified to toggle since we only have 2 windows
+    -- In a vertical split: h/l toggles, j/k does nothing
+    -- In a horizontal split: j/k toggles, h/l does nothing
+    -- For simplicity, all directions toggle between the two windows
+    toggle_between_windows()
+  elseif key == 'c' or key == 'q' then  -- C-w c or C-w q (close window)
+    M.close()
+  elseif key == 'o' or key == '\15' then  -- C-w o or C-w C-o (only/maximize)
+    -- Could implement maximize behavior, for now just ignore
+    -- Alternatively, could close the floating cmdline
+  elseif key == 'p' or key == '\16' then  -- C-w p or C-w C-p (previous window)
+    toggle_between_windows()
+  elseif key == '\27' then  -- Escape
+    -- User pressed Escape after C-w, cancel the command
+    return
+  else
+    -- Unknown command, could show a message or just ignore
+    -- For now, just ignore
+  end
+end
+
 -- Setup keymaps for prompt buffer
 local function setup_prompt_keymaps()
   -- Enter to execute command
@@ -501,6 +553,24 @@ local function setup_prompt_keymaps()
   vim.keymap.set('n', '<C-c>', function()
     M.close()
   end, { buffer = state.prompt_buf, silent = true })
+  
+  -- Override C-w prefix for window navigation
+  vim.keymap.set('n', '<C-w>', function()
+    handle_window_command()
+  end, { buffer = state.prompt_buf, silent = true })
+end
+
+-- Setup keymaps for output buffer
+local function setup_output_keymaps()
+  -- C-c to close in normal mode
+  vim.keymap.set('n', '<C-c>', function()
+    M.close()
+  end, { buffer = state.output_buf, silent = true })
+  
+  -- Override C-w prefix for window navigation
+  vim.keymap.set('n', '<C-w>', function()
+    handle_window_command()
+  end, { buffer = state.output_buf, silent = true })
 end
 
 -- Close floating command line
@@ -557,6 +627,7 @@ function M.open()
   
   -- Setup keymaps
   setup_prompt_keymaps()
+  setup_output_keymaps()
   
   -- Reset history navigation
   state.history_index = 0
