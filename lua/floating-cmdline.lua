@@ -112,7 +112,7 @@ local function create_output_buffer()
   state.output_buf = vim.api.nvim_create_buf(false, true)
   
   vim.api.nvim_buf_set_option(state.output_buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.output_buf, 'bufhidden', 'wipe')
+  vim.api.nvim_buf_set_option(state.output_buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
   vim.api.nvim_buf_set_option(state.output_buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.output_buf, 'buflisted', false)
   vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)  -- Read-only
@@ -126,7 +126,7 @@ local function create_prompt_buffer()
   
   vim.api.nvim_buf_set_option(state.prompt_buf, 'buftype', 'nofile')
   vim.api.nvim_buf_set_option(state.prompt_buf, 'filetype', 'vim')  -- For command completion
-  vim.api.nvim_buf_set_option(state.prompt_buf, 'bufhidden', 'wipe')
+  vim.api.nvim_buf_set_option(state.prompt_buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
   vim.api.nvim_buf_set_option(state.prompt_buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.prompt_buf, 'buflisted', false)
   vim.api.nvim_buf_set_option(state.prompt_buf, 'modifiable', true)
@@ -277,82 +277,46 @@ local function command_complete(findstart, base)
     local line = vim.fn.getline('.')
     local col = vim.fn.col('.') - 1
     
-    -- Check if this is a file completion context (command + space + something)
-    local has_space = line:find('%s')
-    
-    if has_space then
-      -- We're completing arguments/files
-      local file_commands = { 'e', 'edit', 'sp', 'split', 'vs', 'vsplit', 'tabe', 'tabedit' }
-      local first_word = line:match('^(%S+)')
-      local is_file_completion = false
-      
-      if first_word then
-        for _, cmd in ipairs(file_commands) do
-          if first_word == cmd then
-            is_file_completion = true
-            break
-          end
-        end
+    -- Find the start of the current word being completed
+    -- Look backwards for word boundaries (space, =, comma, etc.)
+    local word_start = col
+    for i = col, 0, -1 do
+      local char = line:sub(i, i)
+      -- Break on common word separators
+      if char:match('[%s=,:]') then
+        word_start = i
+        break
       end
-      
-      -- Find start of current word being completed
-      local word_start = col
-      for i = col, 0, -1 do
-        local char = line:sub(i, i)
-        if is_file_completion then
-          -- For files, only break on spaces
-          if char:match('%s') then
-            word_start = i
-            break
-          end
-        else
-          -- For other completions, break on spaces or special chars
-          if char:match('%s') then
-            word_start = i
-            break
-          end
-        end
-        word_start = i - 1
-      end
-      
-      return word_start
-    else
-      -- We're completing the command name itself
-      -- Start from beginning of line
-      return 0
+      word_start = i - 1
     end
+    
+    return word_start
   else
-    -- Get the full command line
+    -- Get the full command line up to the cursor position
     local line = vim.fn.getline('.')
+    local col = vim.fn.col('.') - 1
     
-    -- Check if we're completing command or arguments
-    local has_space = line:find('%s')
-    
-    if not has_space then
-      -- Completing command name - use base which has the partial text
-      local completions = vim.fn.getcompletion(base or '', 'cmdline')
-      return completions
-    else
-      -- Completing arguments
-      -- Get everything before the current word
-      local words = vim.split(line, '%s+', { trimempty = true })
-      
-      if #words == 1 then
-        -- Just command + space, completing first argument
-        local context = words[1] .. ' ' .. (base or '')
-        local completions = vim.fn.getcompletion(context, 'cmdline')
-        return completions
-      else
-        -- Multiple words, build full context
-        local context = line
-        if base and base ~= '' and not line:find(vim.pesc(base) .. '$') then
-          -- If base is not at the end of line, we need to add it
-          context = line .. base
-        end
-        local completions = vim.fn.getcompletion(context, 'cmdline')
-        return completions
+    -- Find where the current word starts (should match findstart logic)
+    local word_start = col
+    for i = col, 0, -1 do
+      local char = line:sub(i, i)
+      if char:match('[%s=,:]') then
+        word_start = i
+        break
       end
+      word_start = i - 1
     end
+    
+    -- Get the prefix (everything before the word being completed)
+    local prefix = line:sub(1, word_start)
+    
+    -- Build the full context for completion
+    local context = prefix .. (base or '')
+    
+    -- Get completions from Vim
+    local completions = vim.fn.getcompletion(context, 'cmdline')
+    
+    return completions
   end
 end
 
@@ -595,15 +559,8 @@ function M.close()
     state.output_win = nil
   end
   
-  if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
-    vim.api.nvim_buf_delete(state.prompt_buf, { force = true })
-    state.prompt_buf = nil
-  end
-  
-  if state.output_buf and vim.api.nvim_buf_is_valid(state.output_buf) then
-    vim.api.nvim_buf_delete(state.output_buf, { force = true })
-    state.output_buf = nil
-  end
+  -- Keep buffers alive, don't delete them
+  -- This preserves history between open/close cycles
   
   state.is_open = false
   state.original_win = nil
@@ -618,14 +575,19 @@ function M.open()
   state.original_win = vim.api.nvim_get_current_win()
   state.original_buf = vim.api.nvim_get_current_buf()
   
-  -- Create buffers
-  create_output_buffer()
-  create_prompt_buffer()
+  -- Create buffers only if they don't exist or are invalid
+  if not state.output_buf or not vim.api.nvim_buf_is_valid(state.output_buf) then
+    create_output_buffer()
+  end
+  
+  if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then
+    create_prompt_buffer()
+  end
   
   -- Create windows
   create_windows()
   
-  -- Setup keymaps
+  -- Setup keymaps (needed each time since they're buffer-local)
   setup_prompt_keymaps()
   setup_output_keymaps()
   
@@ -633,7 +595,7 @@ function M.open()
   state.history_index = 0
   state.is_open = true
   
-  -- Initialize prompt
+  -- Clear prompt for new command
   clear_prompt()
   
   -- Start in insert mode
