@@ -18,8 +18,8 @@ local state = {
   output_win = nil,
   
   is_open = false,
-  command_history = {},
-  history_index = 0,
+  history_index = 0,  -- Start at 0 (not navigating), negative values are history positions
+  current_input = '',  -- Store current input when navigating history
   
   -- Store original context
   original_win = nil,
@@ -32,50 +32,10 @@ local state = {
   command_execution_timer = nil,
 }
 
--- History file
-local history_file = vim.fn.stdpath('data') .. '/floating_cmdline_history.json'
-
--- Load command history
-local function load_history()
-  local file = io.open(history_file, 'r')
-  if file then
-    local content = file:read('*a')
-    file:close()
-    local success, decoded = pcall(vim.json.decode, content)
-    if success and decoded and type(decoded) == 'table' then
-      state.command_history = decoded
-    end
-  end
-end
-
--- Save command history
-local function save_history()
-  local file = io.open(history_file, 'w')
-  if file then
-    file:write(vim.json.encode(state.command_history))
-    file:close()
-  end
-end
-
--- Add command to history
+-- Add command to Vim's native command history
 local function add_to_history(cmd)
-  -- Remove if already exists
-  for i, existing in ipairs(state.command_history) do
-    if existing == cmd then
-      table.remove(state.command_history, i)
-      break
-    end
-  end
-  
-  -- Add to beginning
-  table.insert(state.command_history, 1, cmd)
-  
-  -- Limit history size
-  if #state.command_history > 100 then
-    state.command_history[101] = nil
-  end
-  
-  save_history()
+  -- Add to Vim's command history
+  vim.fn.histadd('cmd', cmd)
 end
 
 -- Get window dimensions and positions for both windows
@@ -277,46 +237,68 @@ local function command_complete(findstart, base)
     local line = vim.fn.getline('.')
     local col = vim.fn.col('.') - 1
     
-    -- Find the start of the current word being completed
-    -- Look backwards for word boundaries (space, =, comma, etc.)
-    local word_start = col
-    for i = col, 0, -1 do
-      local char = line:sub(i, i)
-      -- Break on common word separators
-      if char:match('[%s=,:]') then
-        word_start = i
-        break
-      end
-      word_start = i - 1
-    end
+    -- Check if we're completing a command or arguments
+    local has_space = line:find('%s')
     
-    return word_start
+    if not has_space then
+      -- Completing command name - start from beginning of line
+      return 0
+    else
+      -- Completing arguments - find the start of current word
+      -- Look backwards for word boundaries (space, =, comma, etc.)
+      local word_start = col
+      for i = col, 0, -1 do
+        local char = line:sub(i, i)
+        -- Break on common word separators
+        if char:match('[%s=,:]') then
+          word_start = i
+          break
+        end
+        word_start = i - 1
+      end
+      
+      return word_start
+    end
   else
-    -- Get the full command line up to the cursor position
+    -- Get the full command line
     local line = vim.fn.getline('.')
-    local col = vim.fn.col('.') - 1
     
-    -- Find where the current word starts (should match findstart logic)
-    local word_start = col
-    for i = col, 0, -1 do
-      local char = line:sub(i, i)
-      if char:match('[%s=,:]') then
-        word_start = i
-        break
+    -- Check if we're completing command or arguments
+    local has_space = line:find('%s')
+    
+    if not has_space then
+      -- Completing command name - use base which has the partial text
+      local completions = vim.fn.getcompletion(base or '', 'cmdline')
+      return completions
+    else
+      -- Completing arguments - need full context
+      local col = vim.fn.col('.') - 1
+      
+      -- Find where the current word starts (for arguments after =, :, etc.)
+      local word_start = col
+      for i = col, 0, -1 do
+        local char = line:sub(i, i)
+        if char:match('[%s=,:]') then
+          word_start = i
+          break
+        end
+        word_start = i - 1
       end
-      word_start = i - 1
+      
+      -- Get the prefix (everything before the word being completed)
+      local prefix = ''
+      if word_start > 0 then
+        prefix = line:sub(1, word_start)
+      end
+      
+      -- Build the full context for completion
+      local context = prefix .. (base or '')
+      
+      -- Get completions from Vim
+      local completions = vim.fn.getcompletion(context, 'cmdline')
+      
+      return completions
     end
-    
-    -- Get the prefix (everything before the word being completed)
-    local prefix = line:sub(1, word_start)
-    
-    -- Build the full context for completion
-    local context = prefix .. (base or '')
-    
-    -- Get completions from Vim
-    local completions = vim.fn.getcompletion(context, 'cmdline')
-    
-    return completions
   end
 end
 
@@ -411,18 +393,48 @@ local function replace_current_command(cmd)
   end
 end
 
--- Handle command history navigation
+-- Handle command history navigation using Vim's native history
 local function navigate_history(direction)
-  if #state.command_history == 0 then return end
+  local history_max = vim.fn.histnr('cmd')
   
-  if direction == 'up' then
-    state.history_index = math.min(state.history_index + 1, #state.command_history)
-  elseif direction == 'down' then
-    state.history_index = math.max(state.history_index - 1, 0)
+  if history_max <= 0 then return end
+  
+  -- Save current input when starting navigation
+  if state.history_index == 0 then
+    state.current_input = get_current_command()
   end
   
-  local cmd = state.history_index > 0 and state.command_history[state.history_index] or ''
-  replace_current_command(cmd)
+  if direction == 'up' then
+    -- Go back in history (more negative)
+    if state.history_index == 0 then
+      -- Starting navigation, go to last command
+      state.history_index = -1
+    else
+      -- Continue going back
+      local new_index = state.history_index - 1
+      if math.abs(new_index) <= history_max then
+        state.history_index = new_index
+      end
+    end
+  elseif direction == 'down' then
+    -- Go forward in history (less negative)
+    if state.history_index < -1 then
+      state.history_index = state.history_index + 1
+    elseif state.history_index == -1 then
+      -- Reached the bottom, restore original input
+      state.history_index = 0
+      replace_current_command(state.current_input)
+      return
+    end
+  end
+  
+  -- Get command from Vim's history (only if we have a valid index)
+  if state.history_index < 0 then
+    local cmd = vim.fn.histget('cmd', state.history_index)
+    if cmd and cmd ~= '' then
+      replace_current_command(cmd)
+    end
+  end
 end
 
 -- Toggle between prompt and output windows
@@ -593,6 +605,7 @@ function M.open()
   
   -- Reset history navigation
   state.history_index = 0
+  state.current_input = ''
   state.is_open = true
   
   -- Clear prompt for new command
@@ -614,9 +627,6 @@ function M.setup(opts)
   for k, v in pairs(opts) do
     config[k] = v
   end
-  
-  -- Load history
-  load_history()
   
   -- Set up global keymap
   vim.keymap.set('n', '<C-o>', M.open, { silent = true, desc = 'Open floating command line' })
