@@ -573,11 +573,9 @@ local function handle_window_command()
     toggle_between_windows()
   elseif key == 'W' then  -- C-w W (cycle backwards)
     toggle_between_windows()
-  elseif key == 'h' or key == 'j' or key == 'k' or key == 'l' then
-    -- Directional navigation - simplified to toggle since we only have 2 windows
-    -- In a vertical split: h/l toggles, j/k does nothing
-    -- In a horizontal split: j/k toggles, h/l does nothing
-    -- For simplicity, all directions toggle between the two windows
+  elseif key == 'j' or key == 'k' or key == '\10' or key == '\11' then
+    -- Vertical navigation only: j/k and C-j/C-k (\10 = C-j, \11 = C-k)
+    -- Since we have a vertical layout (prompt below output), only j/k make sense
     toggle_between_windows()
   elseif key == 'c' or key == 'q' then  -- C-w c or C-w q (close window)
     M.close()
@@ -618,8 +616,16 @@ local function setup_prompt_keymaps()
     end
   end, { buffer = state.prompt_buf, silent = true })
   
-  -- Ctrl-N for completion
-  vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.prompt_buf, silent = true })
+  -- Ctrl-N for context-aware completion
+  vim.keymap.set('i', '<C-n>', function()
+    if vim.fn.pumvisible() == 1 then
+      -- Popup is open, navigate down
+      return '<C-n>'
+    else
+      -- No popup, trigger user completion
+      return '<C-x><C-u>'
+    end
+  end, { buffer = state.prompt_buf, silent = true, expr = true })
   
   
   -- C-c to close in normal mode
