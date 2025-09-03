@@ -23,12 +23,6 @@ local state = {
   -- Store original context
   original_win = nil,
   original_buf = nil,
-  
-  -- Message capture
-  message_capture_active = false,
-  original_functions = {},
-  message_count = 0,
-  command_execution_timer = nil,
 }
 
 -- Get window dimensions and positions for both windows
@@ -174,59 +168,6 @@ local function clear_prompt()
   end
 end
 
--- Start capturing messages by hooking into nvim_echo
-local function start_message_capture()
-  if state.message_capture_active then
-    return -- Already active
-  end
-  
-  -- Reset message counter for new command
-  state.message_count = 0
-  
-  -- Store original functions
-  state.original_functions.nvim_echo = vim.api.nvim_echo
-  
-  -- Hook into nvim_echo
-  vim.api.nvim_echo = function(chunks, history, opts)
-    -- Safely capture messages
-    local ok = pcall(function()
-      if state.is_open then
-        for _, chunk in ipairs(chunks) do
-          local text = chunk[1]
-          if text and text ~= '' then
-            -- Trim whitespace and check if empty
-            local trimmed = text:gsub('^%s*(.-)%s*$', '%1')
-            -- Filter out empty lines and whitespace-only
-            if trimmed ~= '' then
-              append_to_output({'  [Message] ' .. trimmed})
-              state.message_count = state.message_count + 1
-            end
-          end
-        end
-      end
-    end)
-    
-    -- Always call original function, even if our code fails
-    return state.original_functions.nvim_echo(chunks, history, opts)
-  end
-  
-  state.message_capture_active = true
-end
-
--- Stop capturing messages and restore original functions
-local function stop_message_capture()
-  if not state.message_capture_active then
-    return -- Not active
-  end
-  
-  -- Restore original functions
-  if state.original_functions.nvim_echo then
-    vim.api.nvim_echo = state.original_functions.nvim_echo
-    state.original_functions.nvim_echo = nil
-  end
-  
-  state.message_capture_active = false
-end
 
 -- Custom completion function for command completion
 local function command_complete(findstart, base)
@@ -315,9 +256,6 @@ local function execute_command(cmd)
   -- Show command in output
   append_to_output({'> ' .. cmd})
   
-  -- Start capturing messages for this command
-  start_message_capture()
-  
   -- Store original context
   local current_win = vim.api.nvim_get_current_win()
   local target_win = state.original_win
@@ -355,12 +293,6 @@ local function execute_command(cmd)
     vim.api.nvim_set_current_win(state.prompt_win)
     clear_prompt()
   end
-  
-  -- Keep window open and continue capturing messages
-  vim.defer_fn(function()
-    -- Stop capture after delay
-    stop_message_capture()
-  end, 2000) -- Continue capturing for 2 seconds
 end
 
 -- Get current command from prompt
@@ -523,34 +455,6 @@ local function rerun_command_at_cursor()
     end
   end
   
-  -- Store original functions for message capture
-  local original_nvim_echo = vim.api.nvim_echo
-  
-  -- Reset message counter
-  state.message_count = 0
-  
-  -- Hook into nvim_echo for this rerun only
-  vim.api.nvim_echo = function(chunks, history, opts)
-    -- Safely capture messages
-    local ok = pcall(function()
-      if state.is_open then
-        for _, chunk in ipairs(chunks) do
-          local text = chunk[1]
-          if text and text ~= '' then
-            local trimmed = text:gsub('^%s*(.-)%s*$', '%1')
-            if trimmed ~= '' then
-              insert_at_location({'  [Message] ' .. trimmed})
-              state.message_count = state.message_count + 1
-            end
-          end
-        end
-      end
-    end)
-    
-    -- Always call original function
-    return original_nvim_echo(chunks, history, opts)
-  end
-  
   -- Store original context
   local current_win = vim.api.nvim_get_current_win()
   local target_win = state.original_win
@@ -580,12 +484,6 @@ local function rerun_command_at_cursor()
   
   -- Switch back to output window
   vim.api.nvim_set_current_win(current_win)
-  
-  -- Restore after a delay
-  vim.defer_fn(function()
-    -- Restore original nvim_echo
-    vim.api.nvim_echo = original_nvim_echo
-  end, 2000)
   
   -- Make buffer read-only again
   vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
@@ -816,15 +714,6 @@ end
 
 -- Close floating command line
 function M.close()
-  -- Clean up any running timer
-  if state.command_execution_timer then
-    state.command_execution_timer:stop()
-    state.command_execution_timer:close()
-    state.command_execution_timer = nil
-  end
-  
-  -- Stop message capture first
-  stop_message_capture()
   
   -- Remember which window had focus before closing
   local current_win = vim.api.nvim_get_current_win()
