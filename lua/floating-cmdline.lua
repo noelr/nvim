@@ -605,6 +605,44 @@ local function replace_current_command(cmd)
   end
 end
 
+-- Jump to next command line (line starting with '> ')
+local function jump_to_next_command()
+  if not state.output_win or not vim.api.nvim_win_is_valid(state.output_win) then
+    return
+  end
+  
+  local cursor = vim.api.nvim_win_get_cursor(state.output_win)
+  local current_line = cursor[1]
+  local lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
+  
+  -- Search forward from next line
+  for i = current_line + 1, #lines do
+    if lines[i] and lines[i]:match('^> ') then
+      vim.api.nvim_win_set_cursor(state.output_win, {i, 0})
+      return
+    end
+  end
+end
+
+-- Jump to previous command line (line starting with '> ')
+local function jump_to_previous_command()
+  if not state.output_win or not vim.api.nvim_win_is_valid(state.output_win) then
+    return
+  end
+  
+  local cursor = vim.api.nvim_win_get_cursor(state.output_win)
+  local current_line = cursor[1]
+  local lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
+  
+  -- Search backward from previous line
+  for i = current_line - 1, 1, -1 do
+    if lines[i] and lines[i]:match('^> ') then
+      vim.api.nvim_win_set_cursor(state.output_win, {i, 0})
+      return
+    end
+  end
+end
+
 -- Toggle between prompt and output windows
 local function toggle_between_windows()
   local current_win = vim.api.nvim_get_current_win()
@@ -766,6 +804,14 @@ local function setup_output_keymaps()
   vim.keymap.set('n', 'A', switch_to_prompt_insert_end, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt and insert at end' })
   vim.keymap.set('n', 'o', switch_to_prompt_new_line, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt with new line' })
   vim.keymap.set('n', 'O', switch_to_prompt_new_line, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt with new line' })
+  
+  -- Command navigation (Vim-style)
+  vim.keymap.set('n', ']c', jump_to_next_command, { buffer = state.output_buf, silent = true, desc = 'Jump to next command' })
+  vim.keymap.set('n', '[c', jump_to_previous_command, { buffer = state.output_buf, silent = true, desc = 'Jump to previous command' })
+  
+  -- Command navigation (alternative: Ctrl keys for familiar command history feel)
+  vim.keymap.set('n', '<C-n>', jump_to_next_command, { buffer = state.output_buf, silent = true, desc = 'Jump to next command' })
+  vim.keymap.set('n', '<C-p>', jump_to_previous_command, { buffer = state.output_buf, silent = true, desc = 'Jump to previous command' })
 end
 
 -- Close floating command line
