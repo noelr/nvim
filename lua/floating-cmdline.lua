@@ -140,6 +140,11 @@ local function append_to_output(lines)
   -- Get current content
   local current_lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
   
+  -- If buffer only contains one empty line, replace it instead of appending
+  if #current_lines == 1 and current_lines[1] == '' then
+    current_lines = {}
+  end
+  
   -- Append new lines
   for _, line in ipairs(lines) do
     table.insert(current_lines, line)
