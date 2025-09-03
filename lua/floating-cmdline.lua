@@ -18,6 +18,7 @@ local state = {
   output_win = nil,
   
   is_open = false,
+  last_focused_window = 'prompt',  -- Remember which window had focus ('prompt' or 'output')
   
   -- Store original context
   original_win = nil,
@@ -96,8 +97,12 @@ end
 local function create_windows()
   local configs = get_window_configs()
   
+  -- Determine which window should get initial focus
+  local focus_output = (state.last_focused_window == 'output')
+  local focus_prompt = not focus_output
+  
   -- Create output window first (appears above prompt)
-  state.output_win = vim.api.nvim_open_win(state.output_buf, false, {
+  state.output_win = vim.api.nvim_open_win(state.output_buf, focus_output, {
     relative = 'editor',
     width = configs.output.width,
     height = configs.output.height,
@@ -112,8 +117,8 @@ local function create_windows()
   vim.api.nvim_win_set_option(state.output_win, 'wrap', true)
   vim.api.nvim_win_set_option(state.output_win, 'scrolloff', 0)
   
-  -- Create prompt window (appears below output, gets focus)
-  state.prompt_win = vim.api.nvim_open_win(state.prompt_buf, true, {
+  -- Create prompt window (appears below output)
+  state.prompt_win = vim.api.nvim_open_win(state.prompt_buf, focus_prompt, {
     relative = 'editor',
     width = configs.prompt.width,
     height = configs.prompt.height,
@@ -429,6 +434,33 @@ local function get_command_output_range(cmd_line)
   return start_line, end_line
 end
 
+-- Delete command output (optionally including the command line itself)
+local function delete_command_output(cmd_line, include_command)
+  local start_line, end_line = get_command_output_range(cmd_line)
+  
+  -- Determine what to delete
+  local delete_start = include_command and cmd_line or (start_line or cmd_line + 1)
+  local delete_end = end_line or cmd_line
+  
+  -- Skip if nothing to delete
+  if not include_command and not start_line then
+    return nil, nil -- No output to delete
+  end
+  
+  -- Make buffer modifiable
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
+  
+  -- Delete the lines
+  if delete_start <= delete_end then
+    vim.api.nvim_buf_set_lines(state.output_buf, delete_start - 1, delete_end, false, {})
+  end
+  
+  -- Make buffer read-only again
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+  
+  return delete_start, delete_end
+end
+
 -- Delete command and its output at cursor
 local function delete_command_at_cursor()
   local cmd, cmd_line = get_command_at_cursor()
@@ -437,20 +469,11 @@ local function delete_command_at_cursor()
     return
   end
   
-  local start_line, end_line = get_command_output_range(cmd_line)
-  
-  -- Make buffer modifiable
-  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
-  
-  -- Determine range to delete (including the command line itself)
-  local delete_start = cmd_line
-  local delete_end = end_line or cmd_line
-  
-  -- Delete the command and its output
-  vim.api.nvim_buf_set_lines(state.output_buf, delete_start - 1, delete_end, false, {})
-  
-  -- Make buffer read-only again
-  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+  -- Delete command and its output
+  local delete_start, delete_end = delete_command_output(cmd_line, true)
+  if not delete_start then
+    return
+  end
   
   -- Adjust cursor position if needed
   local new_line_count = vim.api.nvim_buf_line_count(state.output_buf)
@@ -469,16 +492,8 @@ local function rerun_command_at_cursor()
     return
   end
   
-  local start_line, end_line = get_command_output_range(cmd_line)
-  
-  -- Make buffer modifiable
-  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
-  
-  -- Delete old output if it exists
-  if start_line and end_line then
-    -- Delete the old output lines
-    vim.api.nvim_buf_set_lines(state.output_buf, start_line - 1, end_line, false, {})
-  end
+  -- Delete old output (but keep the command line)
+  delete_command_output(cmd_line, false)
   
   -- Set cursor to the command line to insert output after it
   vim.api.nvim_win_set_cursor(state.output_win, {cmd_line, 0})
@@ -595,14 +610,16 @@ local function toggle_between_windows()
   local current_win = vim.api.nvim_get_current_win()
   
   if current_win == state.prompt_win then
-    -- Switch to output window
+    -- Switch to output window - always ensure normal mode
     if state.output_win and vim.api.nvim_win_is_valid(state.output_win) then
       vim.api.nvim_set_current_win(state.output_win)
+      vim.cmd('stopinsert')  -- Force normal mode in output window
     end
   elseif current_win == state.output_win then
-    -- Switch to prompt window
+    -- Switch to prompt window - always enter insert mode
     if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
       vim.api.nvim_set_current_win(state.prompt_win)
+      vim.cmd('startinsert!')  -- Always enter insert mode in prompt
     end
   end
 end
@@ -701,6 +718,54 @@ local function setup_output_keymaps()
   vim.keymap.set('n', 'dd', function()
     delete_command_at_cursor()
   end, { buffer = state.output_buf, silent = true, desc = 'Delete command and output' })
+  
+  -- Insert mode commands redirect to prompt window
+  local function switch_to_prompt_insert()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      vim.cmd('startinsert')
+    end
+  end
+  
+  local function switch_to_prompt_append()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      -- Just use startinsert! which appends after cursor
+      vim.cmd('startinsert!')
+    end
+  end
+  
+  local function switch_to_prompt_insert_end()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      vim.cmd('normal! $')
+      vim.cmd('startinsert!')
+    end
+  end
+  
+  local function switch_to_prompt_insert_start()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      vim.cmd('normal! 0')
+      vim.cmd('startinsert')
+    end
+  end
+  
+  local function switch_to_prompt_new_line()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      clear_prompt()
+      vim.cmd('startinsert!')
+    end
+  end
+  
+  -- Map insert mode keys to switch to prompt
+  vim.keymap.set('n', 'i', switch_to_prompt_insert, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt and insert' })
+  vim.keymap.set('n', 'a', switch_to_prompt_append, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt and append' })
+  vim.keymap.set('n', 'I', switch_to_prompt_insert_start, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt and insert at start' })
+  vim.keymap.set('n', 'A', switch_to_prompt_insert_end, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt and insert at end' })
+  vim.keymap.set('n', 'o', switch_to_prompt_new_line, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt with new line' })
+  vim.keymap.set('n', 'O', switch_to_prompt_new_line, { buffer = state.output_buf, silent = true, desc = 'Switch to prompt with new line' })
 end
 
 -- Close floating command line
@@ -714,6 +779,14 @@ function M.close()
   
   -- Stop message capture first
   stop_message_capture()
+  
+  -- Remember which window had focus before closing
+  local current_win = vim.api.nvim_get_current_win()
+  if current_win == state.prompt_win then
+    state.last_focused_window = 'prompt'
+  elseif current_win == state.output_win then
+    state.last_focused_window = 'output'
+  end
   
   if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
     vim.api.nvim_win_close(state.prompt_win, true)
@@ -762,8 +835,10 @@ function M.open()
   -- Clear prompt for new command
   clear_prompt()
   
-  -- Start in insert mode
-  vim.cmd('startinsert!')
+  -- Only start in insert mode if the prompt window has focus
+  if state.last_focused_window == 'prompt' then
+    vim.cmd('startinsert!')
+  end
 end
 
 -- Expose completion function for v:lua access
