@@ -18,8 +18,6 @@ local state = {
   output_win = nil,
   
   is_open = false,
-  history_index = 0,  -- Start at 0 (not navigating), negative values are history positions
-  current_input = '',  -- Store current input when navigating history
   
   -- Store original context
   original_win = nil,
@@ -31,12 +29,6 @@ local state = {
   message_count = 0,
   command_execution_timer = nil,
 }
-
--- Add command to Vim's native command history
-local function add_to_history(cmd)
-  -- Add to Vim's command history
-  vim.fn.histadd('cmd', cmd)
-end
 
 -- Get window dimensions and positions for both windows
 local function get_window_configs()
@@ -312,8 +304,8 @@ local function execute_command(cmd)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-e>', true, false, true), 'n', false)
   end
   
-  -- Add to history
-  add_to_history(cmd)
+  -- Add to Vim's native command history
+  vim.fn.histadd('cmd', cmd)
   
   -- Show command in output
   append_to_output({'> ' .. cmd})
@@ -361,8 +353,7 @@ local function execute_command(cmd)
   
   -- Keep window open and continue capturing messages
   vim.defer_fn(function()
-    -- Add separator and stop capture after delay
-    append_to_output({''})
+    -- Stop capture after delay
     stop_message_capture()
   end, 2000) -- Continue capturing for 2 seconds
 end
@@ -379,6 +370,212 @@ local function get_current_command()
   return cmd:gsub('^%s*(.-)%s*$', '%1')
 end
 
+-- Find command at or above cursor in output buffer
+local function get_command_at_cursor()
+  if not state.output_buf or not vim.api.nvim_buf_is_valid(state.output_buf) then
+    return nil, nil
+  end
+  
+  -- Get cursor position
+  local cursor = vim.api.nvim_win_get_cursor(state.output_win)
+  local current_line = cursor[1]
+  
+  -- Get all lines in buffer
+  local lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
+  
+  -- Search backwards from cursor to find command
+  for i = current_line, 1, -1 do
+    local line = lines[i]
+    if line and line:match('^> ') then
+      -- Found command, extract it without the '> ' prefix
+      local cmd = line:sub(3)
+      return cmd, i
+    end
+  end
+  
+  return nil, nil
+end
+
+-- Find the range of lines containing a command's output
+local function get_command_output_range(cmd_line)
+  if not state.output_buf or not vim.api.nvim_buf_is_valid(state.output_buf) then
+    return nil, nil
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.output_buf, 0, -1, false)
+  local total_lines = #lines
+  
+  -- Output starts right after the command line
+  local start_line = cmd_line + 1
+  if start_line > total_lines then
+    return nil, nil  -- No output for this command
+  end
+  
+  -- Find where output ends (next command or end of buffer)
+  local end_line = total_lines
+  for i = start_line, total_lines do
+    local line = lines[i]
+    if line and line:match('^> ') then
+      -- Found next command, output ends before it
+      end_line = i - 1
+      break
+    end
+  end
+  
+  if end_line < start_line then
+    return nil, nil  -- No actual output
+  end
+  
+  return start_line, end_line
+end
+
+-- Delete command and its output at cursor
+local function delete_command_at_cursor()
+  local cmd, cmd_line = get_command_at_cursor()
+  if not cmd then
+    vim.api.nvim_echo({{'No command found at cursor', 'WarningMsg'}}, false, {})
+    return
+  end
+  
+  local start_line, end_line = get_command_output_range(cmd_line)
+  
+  -- Make buffer modifiable
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
+  
+  -- Determine range to delete (including the command line itself)
+  local delete_start = cmd_line
+  local delete_end = end_line or cmd_line
+  
+  -- Delete the command and its output
+  vim.api.nvim_buf_set_lines(state.output_buf, delete_start - 1, delete_end, false, {})
+  
+  -- Make buffer read-only again
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+  
+  -- Adjust cursor position if needed
+  local new_line_count = vim.api.nvim_buf_line_count(state.output_buf)
+  if delete_start - 1 <= new_line_count and delete_start > 1 then
+    vim.api.nvim_win_set_cursor(state.output_win, {delete_start - 1, 0})
+  elseif new_line_count > 0 then
+    vim.api.nvim_win_set_cursor(state.output_win, {math.min(delete_start, new_line_count), 0})
+  end
+end
+
+-- Rerun the command at cursor and replace its output
+local function rerun_command_at_cursor()
+  local cmd, cmd_line = get_command_at_cursor()
+  if not cmd then
+    vim.api.nvim_echo({{'No command found at cursor', 'WarningMsg'}}, false, {})
+    return
+  end
+  
+  local start_line, end_line = get_command_output_range(cmd_line)
+  
+  -- Make buffer modifiable
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
+  
+  -- Delete old output if it exists
+  if start_line and end_line then
+    -- Delete the old output lines
+    vim.api.nvim_buf_set_lines(state.output_buf, start_line - 1, end_line, false, {})
+  end
+  
+  -- Set cursor to the command line to insert output after it
+  vim.api.nvim_win_set_cursor(state.output_win, {cmd_line, 0})
+  
+  -- Helper function to insert at specific location
+  local insert_line = cmd_line + 1
+  local function insert_at_location(new_lines)
+    if not state.output_buf or not vim.api.nvim_buf_is_valid(state.output_buf) then
+      return
+    end
+    
+    -- Make buffer temporarily modifiable
+    vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', true)
+    
+    -- Insert new lines at the specific position
+    for i, line in ipairs(new_lines) do
+      vim.api.nvim_buf_set_lines(state.output_buf, insert_line - 1, insert_line - 1, false, {line})
+      insert_line = insert_line + 1
+    end
+    
+    -- Make buffer read-only again
+    vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+    
+    -- Move cursor to show the new output
+    if state.output_win and vim.api.nvim_win_is_valid(state.output_win) then
+      vim.api.nvim_win_set_cursor(state.output_win, {cmd_line, 0})
+    end
+  end
+  
+  -- Store original functions for message capture
+  local original_nvim_echo = vim.api.nvim_echo
+  
+  -- Reset message counter
+  state.message_count = 0
+  
+  -- Hook into nvim_echo for this rerun only
+  vim.api.nvim_echo = function(chunks, history, opts)
+    -- Safely capture messages
+    local ok = pcall(function()
+      if state.is_open then
+        for _, chunk in ipairs(chunks) do
+          local text = chunk[1]
+          if text and text ~= '' then
+            local trimmed = text:gsub('^%s*(.-)%s*$', '%1')
+            if trimmed ~= '' then
+              insert_at_location({'  [Message] ' .. trimmed})
+              state.message_count = state.message_count + 1
+            end
+          end
+        end
+      end
+    end)
+    
+    -- Always call original function
+    return original_nvim_echo(chunks, history, opts)
+  end
+  
+  -- Store original context
+  local current_win = vim.api.nvim_get_current_win()
+  local target_win = state.original_win
+  
+  if target_win and vim.api.nvim_win_is_valid(target_win) then
+    vim.api.nvim_set_current_win(target_win)
+  end
+  
+  -- Execute command and capture output
+  local ok, result = pcall(vim.fn.execute, cmd)
+  
+  -- Process immediate output
+  if not ok then
+    insert_at_location({'Error: ' .. result})
+  elseif result and result ~= '' then
+    -- Skip output for Explore command
+    local is_explore = cmd:match('^[Ee]xplore?%s*')
+    if not is_explore then
+      for line in result:gmatch('[^\r\n]+') do
+        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+        if trimmed ~= '' then
+          insert_at_location({'  ' .. trimmed})
+        end
+      end
+    end
+  end
+  
+  -- Switch back to output window
+  vim.api.nvim_set_current_win(current_win)
+  
+  -- Restore after a delay
+  vim.defer_fn(function()
+    -- Restore original nvim_echo
+    vim.api.nvim_echo = original_nvim_echo
+  end, 2000)
+  
+  -- Make buffer read-only again
+  vim.api.nvim_buf_set_option(state.output_buf, 'modifiable', false)
+end
+
 -- Replace current command in prompt
 local function replace_current_command(cmd)
   if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then
@@ -390,50 +587,6 @@ local function replace_current_command(cmd)
   -- Move cursor to end
   if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
     vim.api.nvim_win_set_cursor(state.prompt_win, {1, #cmd})
-  end
-end
-
--- Handle command history navigation using Vim's native history
-local function navigate_history(direction)
-  local history_max = vim.fn.histnr('cmd')
-  
-  if history_max <= 0 then return end
-  
-  -- Save current input when starting navigation
-  if state.history_index == 0 then
-    state.current_input = get_current_command()
-  end
-  
-  if direction == 'up' then
-    -- Go back in history (more negative)
-    if state.history_index == 0 then
-      -- Starting navigation, go to last command
-      state.history_index = -1
-    else
-      -- Continue going back
-      local new_index = state.history_index - 1
-      if math.abs(new_index) <= history_max then
-        state.history_index = new_index
-      end
-    end
-  elseif direction == 'down' then
-    -- Go forward in history (less negative)
-    if state.history_index < -1 then
-      state.history_index = state.history_index + 1
-    elseif state.history_index == -1 then
-      -- Reached the bottom, restore original input
-      state.history_index = 0
-      replace_current_command(state.current_input)
-      return
-    end
-  end
-  
-  -- Get command from Vim's history (only if we have a valid index)
-  if state.history_index < 0 then
-    local cmd = vim.fn.histget('cmd', state.history_index)
-    if cmd and cmd ~= '' then
-      replace_current_command(cmd)
-    end
   end
 end
 
@@ -512,15 +665,6 @@ local function setup_prompt_keymaps()
     end
   end, { buffer = state.prompt_buf, silent = true })
   
-  -- History navigation
-  vim.keymap.set('i', '<Up>', function()
-    navigate_history('up')
-  end, { buffer = state.prompt_buf, silent = true })
-  
-  vim.keymap.set('i', '<Down>', function()
-    navigate_history('down')
-  end, { buffer = state.prompt_buf, silent = true })
-  
   -- Ctrl-N for completion
   vim.keymap.set('i', '<C-n>', '<C-x><C-u>', { buffer = state.prompt_buf, silent = true })
   
@@ -547,6 +691,16 @@ local function setup_output_keymaps()
   vim.keymap.set('n', '<C-w>', function()
     handle_window_command()
   end, { buffer = state.output_buf, silent = true })
+  
+  -- Enter to rerun command at cursor
+  vim.keymap.set('n', '<CR>', function()
+    rerun_command_at_cursor()
+  end, { buffer = state.output_buf, silent = true, desc = 'Rerun command at cursor' })
+  
+  -- dd to delete command and its output
+  vim.keymap.set('n', 'dd', function()
+    delete_command_at_cursor()
+  end, { buffer = state.output_buf, silent = true, desc = 'Delete command and output' })
 end
 
 -- Close floating command line
@@ -603,9 +757,6 @@ function M.open()
   setup_prompt_keymaps()
   setup_output_keymaps()
   
-  -- Reset history navigation
-  state.history_index = 0
-  state.current_input = ''
   state.is_open = true
   
   -- Clear prompt for new command
