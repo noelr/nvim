@@ -5,6 +5,8 @@ local config = {
   width_ratio = 0.8,  -- Width relative to screen
   height_ratio = 0.6, -- Height relative to screen for output window
   border = 'rounded', -- Border style
+  output_highlight = 'Comment', -- Highlight group for output lines
+  error_highlight = 'ErrorMsg', -- Highlight group for error lines
 }
 
 -- State
@@ -39,12 +41,20 @@ local function get_window_config()
   }
 end
 
+-- Setup highlight groups for our custom syntax
+local function setup_highlights()
+  -- Define highlight links for our syntax groups (can be customized by user)
+  vim.api.nvim_set_hl(0, 'floatingcmdCommand', { link = 'Statement', default = true })
+  vim.api.nvim_set_hl(0, 'floatingcmdOutput', { link = config.output_highlight, default = true })
+  vim.api.nvim_set_hl(0, 'floatingcmdError', { link = config.error_highlight, default = true })
+end
+
 -- Create terminal buffer
 local function create_buffer()
   state.buf = vim.api.nvim_create_buf(false, true)
   
   vim.api.nvim_buf_set_option(state.buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.buf, 'filetype', 'vim')  -- For command completion
+  vim.api.nvim_buf_set_option(state.buf, 'filetype', 'floatingcmd')  -- Custom filetype for controlled highlighting
   vim.api.nvim_buf_set_option(state.buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
   vim.api.nvim_buf_set_option(state.buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.buf, 'buflisted', false)
@@ -56,7 +66,7 @@ local function create_buffer()
   -- Disable Copilot for this buffer
   vim.api.nvim_buf_set_var(state.buf, 'copilot_enabled', false)
   
-  vim.api.nvim_buf_set_name(state.buf, '[Floating Terminal]')
+  vim.api.nvim_buf_set_name(state.buf, '[Floating Command Line]')
 end
 
 -- Create floating window
@@ -71,7 +81,7 @@ local function create_window()
     row = win_config.row,
     col = win_config.col,
     border = config.border,
-    title = ' Terminal ',
+    title = ' Command Line ',
     title_pos = 'center',
   })
   
@@ -81,7 +91,7 @@ local function create_window()
 end
 
 -- Append content to buffer
-local function append_to_buffer(lines)
+local function append_to_buffer(lines, is_error)
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
     return
   end
@@ -94,6 +104,9 @@ local function append_to_buffer(lines)
     current_lines = {}
   end
   
+  -- Track where new lines start for highlighting
+  local start_line = #current_lines
+  
   -- Append new lines
   for _, line in ipairs(lines) do
     table.insert(current_lines, line)
@@ -101,6 +114,9 @@ local function append_to_buffer(lines)
   
   -- Update buffer
   vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, current_lines)
+  
+  -- With custom syntax, we don't need manual highlighting anymore
+  -- The syntax file handles it automatically
   
   -- Scroll to bottom if window is valid
   if state.win and vim.api.nvim_win_is_valid(state.win) then
@@ -222,7 +238,7 @@ local function execute_current_line()
   
   -- Process output and add to buffer
   if not ok then
-    append_to_buffer({'Error: ' .. result})
+    append_to_buffer({'  Error: ' .. result}, true)  -- Pass true for error highlighting, with indent
   elseif result and result ~= '' then
     -- Skip output for Explore command (produces noise)
     local is_explore = cmd:match('^[Ee]xplore?%s*')
@@ -235,13 +251,13 @@ local function execute_current_line()
         end
       end
       if #output_lines > 0 then
-        append_to_buffer(output_lines)
+        append_to_buffer(output_lines, false)  -- Pass false for normal output
       end
     end
   end
   
   -- Add new empty line for next command and move cursor there
-  append_to_buffer({''})
+  append_to_buffer({''}, false)  -- Empty line is not error output
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
   vim.api.nvim_win_set_cursor(state.win, {total_lines, 0})
   
@@ -260,7 +276,7 @@ local function enter_insert_mode()
   
   -- Only add empty line if the last line is not empty
   if last_line:match('%S') then  -- Contains non-whitespace characters
-    append_to_buffer({''})
+    append_to_buffer({''}, false)  -- Empty line is not error output
     total_lines = vim.api.nvim_buf_line_count(state.buf)
   end
   
@@ -351,8 +367,10 @@ local function rerun_command_at_cursor()
   
   -- Insert new output after the command line
   local output_lines = {}
+  local is_error = false
   if not ok then
-    table.insert(output_lines, 'Error: ' .. result)
+    table.insert(output_lines, '  Error: ' .. result)
+    is_error = true
   elseif result and result ~= '' then
     -- Skip output for Explore command (produces noise)
     local is_explore = cmd:match('^[Ee]xplore?%s*')
@@ -369,6 +387,8 @@ local function rerun_command_at_cursor()
   -- Insert output after the command line
   if #output_lines > 0 then
     vim.api.nvim_buf_set_lines(state.buf, cmd_line, cmd_line, false, output_lines)
+    
+    -- With custom syntax, highlighting is handled automatically
   end
   
   -- Position cursor back on the command line
@@ -453,7 +473,7 @@ end
 -- Setup keymaps for terminal-style buffer
 local function setup_keymaps()
   -- Set up autocmds for modifiable/readonly behavior
-  local augroup = vim.api.nvim_create_augroup('FloatingTerminal', { clear = true })
+  local augroup = vim.api.nvim_create_augroup('FloatingCommandLine', { clear = true })
   
   -- Make buffer readonly when leaving insert mode
   vim.api.nvim_create_autocmd('InsertLeave', {
@@ -491,12 +511,12 @@ local function setup_keymaps()
   end, { buffer = state.buf, silent = true, expr = true })
   
   -- Normal mode: Insert mode triggers (terminal-style)
-  vim.keymap.set('n', 'i', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
-  vim.keymap.set('n', 'a', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
-  vim.keymap.set('n', 'o', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
-  vim.keymap.set('n', 'O', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
-  vim.keymap.set('n', 'A', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
-  vim.keymap.set('n', 'I', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter insert mode (add new line)' })
+  vim.keymap.set('n', 'i', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
+  vim.keymap.set('n', 'a', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
+  vim.keymap.set('n', 'o', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
+  vim.keymap.set('n', 'O', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
+  vim.keymap.set('n', 'A', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
+  vim.keymap.set('n', 'I', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
   
   -- Normal mode: Enter to rerun command at cursor
   vim.keymap.set('n', '<CR>', function()
@@ -554,6 +574,9 @@ function M.open()
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
     create_buffer()
   end
+  
+  -- Setup highlights
+  setup_highlights()
   
   -- Create window
   create_window()
