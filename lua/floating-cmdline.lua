@@ -261,8 +261,18 @@ local function execute_current_line()
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
   vim.api.nvim_win_set_cursor(state.win, {total_lines, 0})
   
-  -- Enter insert mode at end of line
-  vim.cmd('startinsert!')
+  -- Cancel any active completion before starting new line
+  if vim.fn.pumvisible() == 1 then
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-e>', true, false, true), 'n', false)
+  end
+  
+  -- Reset completion state by briefly exiting and re-entering insert mode
+  vim.cmd('stopinsert')
+  vim.defer_fn(function()
+    -- Make sure buffer is modifiable before re-entering insert mode
+    vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
+    vim.cmd('startinsert!')
+  end, 1)
 end
 
 -- Enter insert mode terminal-style (add new line at bottom)
