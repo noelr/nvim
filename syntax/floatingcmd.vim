@@ -9,7 +9,7 @@ endif
 " Match command lines (non-indented, non-empty lines)
 syntax match floatingcmdCommand "^\s\@!.*$"
 
-" Match metadata lines (lines starting with --CMD:)
+" Match metadata lines (lines starting with --CMD:, with or without ID)
 syntax match floatingcmdMetadata "^  --CMD:.*$"
 
 " Match output lines (lines starting with two spaces, but not metadata)

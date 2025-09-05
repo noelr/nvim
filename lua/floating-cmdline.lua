@@ -20,6 +20,9 @@ local state = {
   -- Store original context
   original_win = nil,
   original_buf = nil,
+  
+  -- Counter for unique IDs
+  next_id = 0,
 }
 
 -- Get window dimensions and position
@@ -127,7 +130,7 @@ end
 -- Get metadata from output (if it exists)
 local function get_output_metadata(line_num)
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
-    return nil, nil
+    return nil, nil, nil
   end
   
   local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
@@ -136,13 +139,21 @@ local function get_output_metadata(line_num)
   if line_num < #lines then
     local next_line = lines[line_num + 1]
     if next_line and next_line:match('^  %-%-CMD:') then
-      -- Extract original command from metadata
-      local original_cmd = next_line:match('^  %-%-CMD:(.*)$')
-      return original_cmd, line_num + 1
+      -- Try to extract command and ID (new format)
+      local cmd_and_id = next_line:match('^  %-%-CMD:(.*)$')
+      local original_cmd, id = cmd_and_id:match('^(.*)|ID:(.*)$')
+      
+      if original_cmd and id then
+        -- New format with ID
+        return original_cmd, id, line_num + 1
+      else
+        -- Old format without ID (backward compatibility)
+        return cmd_and_id, nil, line_num + 1
+      end
     end
   end
   
-  return nil, nil
+  return nil, nil, nil
 end
 
 -- Expand truncated output at the given line
@@ -159,19 +170,35 @@ local function expand_truncated_output(summary_line_num)
     return
   end
   
-  -- Try to get hidden content from buffer variable
+  -- Find the associated metadata to get the ID
   local hidden_lines = {}
-  local success, stored_lines = pcall(vim.api.nvim_buf_get_var, state.buf, 'hidden_' .. summary_line_num)
-  if success and stored_lines then
-    hidden_lines = stored_lines
+  -- Look backwards for the metadata line
+  for i = summary_line_num - 1, 1, -1 do
+    local line = lines[i]
+    if line and line:match('^  %-%-CMD:') then
+      -- Found metadata line, extract ID
+      local cmd_and_id = line:match('^  %-%-CMD:(.*)$')
+      local original_cmd, id = cmd_and_id:match('^(.*)|ID:(.*)$')
+      
+      if id then
+        -- Try to get hidden content using the ID
+        local success, stored_lines = pcall(vim.api.nvim_buf_get_var, state.buf, 'hidden_' .. id)
+        if success and stored_lines then
+          hidden_lines = stored_lines
+          -- Keep the buffer variable - don't clean up so reruns can repopulate truncated content
+        end
+      end
+      break
+    elseif line and not line:match('^%s%s') and line:match('%S') then
+      -- Hit a command line, stop looking
+      break
+    end
   end
   
   -- Replace the summary line with hidden content if we have it
   if #hidden_lines > 0 then
     -- Replace summary line with all the hidden content
     vim.api.nvim_buf_set_lines(state.buf, summary_line_num - 1, summary_line_num, false, hidden_lines)
-    -- Clean up the buffer variable since we've expanded it
-    pcall(vim.api.nvim_buf_del_var, state.buf, 'hidden_' .. summary_line_num)
   end
 end
 
@@ -187,18 +214,23 @@ local function clear_outdated_output()
   -- Scan through all lines to find commands with metadata
   for i = 1, #lines do
     local line = lines[i]
-    -- Is this a command line (not indented, has content)?
-    if line and not line:match('^%s%s') and line:match('%S') then
+    -- Check if this looks like a potential command line (not indented output)
+    if line and not line:match('^%s%s') then
       local cmd = line:gsub('^%s*(.-)%s*$', '%1')
-      local stored_cmd, metadata_line = get_output_metadata(i)
+      local stored_cmd, stored_id, metadata_line = get_output_metadata(i)
       
       if stored_cmd then
-        -- This command has output with metadata
+        -- This line has output with metadata (regardless of current content)
         if cmd ~= stored_cmd then
-          -- Command has been edited, mark its output for deletion
+          -- Command has been edited or deleted, mark its output for deletion
           local start_line, end_line = get_command_output_range(i)
           if start_line and end_line then
             table.insert(lines_to_delete, {start = start_line, end_line = end_line})
+          end
+          
+          -- Also clean up any associated hidden content
+          if stored_id then
+            pcall(vim.api.nvim_buf_del_var, state.buf, 'hidden_' .. stored_id)
           end
         end
       end
@@ -352,8 +384,16 @@ local function execute_current_line()
   end
   
   -- Add metadata as first line of output (if there is output)
+  local id = nil
   if #output_lines > 0 then
-    table.insert(output_lines, 1, '  --CMD:' .. cmd)
+    -- Reuse existing ID if available, otherwise generate new one
+    if existing_id then
+      id = existing_id
+    else
+      state.next_id = state.next_id + 1
+      id = tostring(state.next_id)
+    end
+    table.insert(output_lines, 1, '  --CMD:' .. cmd .. '|ID:' .. id)
   end
   
   -- Truncate long output (threshold: 9 lines including metadata)
@@ -373,9 +413,10 @@ local function execute_current_line()
     for i = 10, #output_lines do
       table.insert(hidden_lines, output_lines[i])
     end
-    -- Store hidden content with a unique key based on summary line position
-    local summary_line_pos = line_num + #final_lines
-    vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. summary_line_pos, hidden_lines)
+    -- Store hidden content using the unique ID
+    if id then
+      vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. id, hidden_lines)
+    end
   else
     final_lines = output_lines
   end
@@ -430,6 +471,13 @@ local function rerun_command_at_cursor()
     return  -- Not on a command line
   end
   
+  -- Get existing ID to reuse (if any)
+  local existing_id = nil
+  local stored_cmd, stored_id, metadata_line = get_output_metadata(cmd_line)
+  if stored_id then
+    existing_id = stored_id
+  end
+  
   -- Delete old output (but keep the command line)
   local start_line, end_line = get_command_output_range(cmd_line)
   if start_line then
@@ -473,8 +521,16 @@ local function rerun_command_at_cursor()
   end
   
   -- Add metadata as first line of output (if there is output)
+  local id = nil
   if #output_lines > 0 then
-    table.insert(output_lines, 1, '  --CMD:' .. cmd)
+    -- Reuse existing ID if available, otherwise generate new one
+    if existing_id then
+      id = existing_id
+    else
+      state.next_id = state.next_id + 1
+      id = tostring(state.next_id)
+    end
+    table.insert(output_lines, 1, '  --CMD:' .. cmd .. '|ID:' .. id)
   end
   
   -- Truncate long output (threshold: 9 lines including metadata)
@@ -494,9 +550,10 @@ local function rerun_command_at_cursor()
     for i = 10, #output_lines do
       table.insert(hidden_lines, output_lines[i])
     end
-    -- Store hidden content with a unique key based on summary line position
-    local summary_line_pos = cmd_line + #final_lines
-    vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. summary_line_pos, hidden_lines)
+    -- Store hidden content using the unique ID (overwrites any existing)
+    if id then
+      vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. id, hidden_lines)
+    end
   else
     final_lines = output_lines
   end
