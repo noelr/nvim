@@ -426,7 +426,7 @@ end
 local function delete_command_at_cursor()
   local cmd, cmd_line = get_command_at_cursor()
   if not cmd then
-    return  -- Not on a command line, do nothing
+    return false  -- Not on a command line, return false to indicate nothing was deleted
   end
   
   -- Find the output range for this command
@@ -446,6 +446,8 @@ local function delete_command_at_cursor()
     new_cursor_line = 1
   end
   vim.api.nvim_win_set_cursor(state.win, {new_cursor_line, 0})
+  
+  return true  -- Successfully deleted command and output
 end
 
 -- Jump to next command line
@@ -524,10 +526,14 @@ local function setup_keymaps()
     rerun_command_at_cursor()
   end, { buffer = state.buf, silent = true, desc = 'Rerun command at cursor' })
   
-  -- Normal mode: dd to delete command and its output
+  -- Normal mode: dd to delete command and its output (or normal delete)
   vim.keymap.set('n', 'dd', function()
-    delete_command_at_cursor()
-  end, { buffer = state.buf, silent = true, desc = 'Delete command and its output' })
+    -- Try to delete as a command first
+    if not delete_command_at_cursor() then
+      -- Not on a command line, use normal dd behavior
+      vim.cmd('normal! dd')
+    end
+  end, { buffer = state.buf, silent = true, desc = 'Delete line (or command with output)' })
   
   -- Normal mode: Command navigation
   vim.keymap.set('n', ']c', function()
