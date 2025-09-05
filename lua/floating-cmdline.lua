@@ -58,7 +58,6 @@ local function create_buffer()
   vim.api.nvim_buf_set_option(state.buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
   vim.api.nvim_buf_set_option(state.buf, 'swapfile', false)
   vim.api.nvim_buf_set_option(state.buf, 'buflisted', false)
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', false)  -- Start as readonly
   
   -- Set up custom command completion
   vim.api.nvim_buf_set_option(state.buf, 'completefunc', 'v:lua.floating_cmdline_complete')
@@ -125,7 +124,38 @@ local function append_to_buffer(lines, is_error)
   end
 end
 
-
+-- Find the output range for a command at given line
+local function get_command_output_range(cmd_line)
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return nil, nil
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  local total_lines = #lines
+  
+  -- Output starts right after the command line
+  local start_line = cmd_line + 1
+  if start_line > total_lines then
+    return nil, nil  -- No output for this command
+  end
+  
+  -- Find where output ends (next command or end of buffer)
+  local end_line = total_lines
+  for i = start_line, total_lines do
+    local line = lines[i]
+    if line and not line:match('^%s%s') and line:match('%S') then
+      -- Found next command (not indented), output ends before it
+      end_line = i - 1
+      break
+    end
+  end
+  
+  if end_line < start_line then
+    return nil, nil  -- No actual output
+  end
+  
+  return start_line, end_line
+end
 
 -- Custom completion function for command completion
 local function command_complete(findstart, base)
@@ -213,6 +243,11 @@ local function execute_current_line()
     return  -- Empty line, nothing to execute
   end
   
+  -- Replace the current line with the trimmed command (remove leading whitespace)
+  if current_line ~= cmd then
+    vim.api.nvim_buf_set_lines(state.buf, line_num - 1, line_num, false, {cmd})
+  end
+  
   -- Close any open completion popup
   if vim.fn.pumvisible() == 1 then
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-e>', true, false, true), 'n', false)
@@ -220,6 +255,12 @@ local function execute_current_line()
   
   -- Add to Vim's native command history
   vim.fn.histadd('cmd', cmd)
+  
+  -- First, delete any existing output for this command
+  local start_line, end_line = get_command_output_range(line_num)
+  if start_line then
+    vim.api.nvim_buf_set_lines(state.buf, start_line - 1, end_line, false, {})
+  end
   
   -- Store original context
   local target_win = state.original_win
@@ -230,56 +271,60 @@ local function execute_current_line()
   -- Execute command and capture output
   local ok, result = pcall(vim.fn.execute, cmd)
   
+  -- Check if our window and buffer are still valid (command might have destroyed them)
+  if not vim.api.nvim_buf_is_valid(state.buf) or not vim.api.nvim_win_is_valid(state.win) then
+    -- Buffer or window was destroyed by the command, bail out
+    state.buf = nil
+    state.win = nil
+    state.is_open = false
+    return
+  end
+  
   -- Switch back to our window
   vim.api.nvim_set_current_win(state.win)
   
-  -- Temporarily make buffer modifiable for output
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
-  
-  -- Process output and add to buffer
+  -- Process output and prepare lines to insert
+  local output_lines = {}
   if not ok then
-    append_to_buffer({'  Error: ' .. result}, true)  -- Pass true for error highlighting, with indent
+    table.insert(output_lines, '  Error: ' .. result)  -- Error with indent
   elseif result and result ~= '' then
     -- Skip output for Explore command (produces noise)
     local is_explore = cmd:match('^[Ee]xplore?%s*')
     if not is_explore then
-      local output_lines = {}
       for line in result:gmatch('[^\r\n]+') do
         local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
         if trimmed ~= '' then
           table.insert(output_lines, '  ' .. trimmed)
         end
       end
-      if #output_lines > 0 then
-        append_to_buffer(output_lines, false)  -- Pass false for normal output
-      end
     end
   end
   
-  -- Add new empty line for next command and move cursor there
-  append_to_buffer({''}, false)  -- Empty line is not error output
+  -- Insert output directly after the command line
+  if #output_lines > 0 then
+    vim.api.nvim_buf_set_lines(state.buf, line_num, line_num, false, output_lines)
+  end
+  
+  -- Move cursor to the line after the output (or stay on command if no output)
+  local new_cursor_line = line_num + #output_lines + 1
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
-  vim.api.nvim_win_set_cursor(state.win, {total_lines, 0})
+  
+  -- If we're at the end of the buffer, add an empty line for the next command
+  if new_cursor_line > total_lines then
+    vim.api.nvim_buf_set_lines(state.buf, total_lines, total_lines, false, {''})
+    vim.api.nvim_win_set_cursor(state.win, {total_lines + 1, 0})
+  else
+    vim.api.nvim_win_set_cursor(state.win, {new_cursor_line, 0})
+  end
   
   -- Cancel any active completion before starting new line
   if vim.fn.pumvisible() == 1 then
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-e>', true, false, true), 'n', false)
   end
-  
-  -- Reset completion state by briefly exiting and re-entering insert mode
-  vim.cmd('stopinsert')
-  vim.defer_fn(function()
-    -- Make sure buffer is modifiable before re-entering insert mode
-    vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
-    vim.cmd('startinsert!')
-  end, 1)
 end
 
--- Enter insert mode terminal-style (add new line at bottom)
-local function enter_insert_mode()
-  -- Make buffer modifiable for editing
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
-  
+-- Prepare for command entry (add new line at bottom)
+local function prepare_command_line()
   -- Check if last line is already empty
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
   local last_line = vim.api.nvim_buf_get_lines(state.buf, total_lines - 1, total_lines, false)[1] or ''
@@ -290,9 +335,8 @@ local function enter_insert_mode()
     total_lines = vim.api.nvim_buf_line_count(state.buf)
   end
   
-  -- Move cursor to the last line and enter insert mode
+  -- Move cursor to the last line
   vim.api.nvim_win_set_cursor(state.win, {total_lines, 0})
-  vim.cmd('startinsert!')
 end
 
 -- Get command at cursor line (for rerun functionality)
@@ -314,48 +358,12 @@ local function get_command_at_cursor()
   return nil
 end
 
--- Find the output range for a command at given line
-local function get_command_output_range(cmd_line)
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
-    return nil, nil
-  end
-  
-  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
-  local total_lines = #lines
-  
-  -- Output starts right after the command line
-  local start_line = cmd_line + 1
-  if start_line > total_lines then
-    return nil, nil  -- No output for this command
-  end
-  
-  -- Find where output ends (next command or end of buffer)
-  local end_line = total_lines
-  for i = start_line, total_lines do
-    local line = lines[i]
-    if line and not line:match('^%s%s') and line:match('%S') then
-      -- Found next command (not indented), output ends before it
-      end_line = i - 1
-      break
-    end
-  end
-  
-  if end_line < start_line then
-    return nil, nil  -- No actual output
-  end
-  
-  return start_line, end_line
-end
-
 -- Rerun command at cursor and replace its output
 local function rerun_command_at_cursor()
   local cmd, cmd_line = get_command_at_cursor()
   if not cmd then
     return  -- Not on a command line
   end
-  
-  -- Temporarily make buffer modifiable for rerun
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
   
   -- Delete old output (but keep the command line)
   local start_line, end_line = get_command_output_range(cmd_line)
@@ -371,6 +379,15 @@ local function rerun_command_at_cursor()
   
   -- Execute command and capture output
   local ok, result = pcall(vim.fn.execute, cmd)
+  
+  -- Check if our window and buffer are still valid (command might have destroyed them)
+  if not vim.api.nvim_buf_is_valid(state.buf) or not vim.api.nvim_win_is_valid(state.win) then
+    -- Buffer or window was destroyed by the command, bail out
+    state.buf = nil
+    state.win = nil
+    state.is_open = false
+    return
+  end
   
   -- Switch back to our window
   vim.api.nvim_set_current_win(state.win)
@@ -403,9 +420,6 @@ local function rerun_command_at_cursor()
   
   -- Position cursor back on the command line
   vim.api.nvim_win_set_cursor(state.win, {cmd_line, 0})
-  
-  -- Make buffer readonly again
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', false)
 end
 
 -- Delete command at cursor and its output
@@ -414,9 +428,6 @@ local function delete_command_at_cursor()
   if not cmd then
     return  -- Not on a command line, do nothing
   end
-  
-  -- Temporarily make buffer modifiable for deletion
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', true)
   
   -- Find the output range for this command
   local start_line, end_line = get_command_output_range(cmd_line)
@@ -427,9 +438,6 @@ local function delete_command_at_cursor()
   
   -- Delete the command line and its output
   vim.api.nvim_buf_set_lines(state.buf, delete_start - 1, delete_end, false, {})
-  
-  -- Make buffer readonly again
-  vim.api.nvim_buf_set_option(state.buf, 'modifiable', false)
   
   -- Adjust cursor position
   local new_line_count = vim.api.nvim_buf_line_count(state.buf)
@@ -482,17 +490,8 @@ end
 
 -- Setup keymaps for terminal-style buffer
 local function setup_keymaps()
-  -- Set up autocmds for modifiable/readonly behavior
+  -- Set up autocmds
   local augroup = vim.api.nvim_create_augroup('FloatingCommandLine', { clear = true })
-  
-  -- Make buffer readonly when leaving insert mode
-  vim.api.nvim_create_autocmd('InsertLeave', {
-    group = augroup,
-    buffer = state.buf,
-    callback = function()
-      vim.api.nvim_buf_set_option(state.buf, 'modifiable', false)
-    end,
-  })
   
   -- Insert mode: Enter to execute current line
   vim.keymap.set('i', '<CR>', function()
@@ -519,14 +518,6 @@ local function setup_keymaps()
       return '<C-x><C-u>'
     end
   end, { buffer = state.buf, silent = true, expr = true })
-  
-  -- Normal mode: Insert mode triggers (terminal-style)
-  vim.keymap.set('n', 'i', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
-  vim.keymap.set('n', 'a', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
-  vim.keymap.set('n', 'o', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
-  vim.keymap.set('n', 'O', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
-  vim.keymap.set('n', 'A', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
-  vim.keymap.set('n', 'I', enter_insert_mode, { buffer = state.buf, silent = true, desc = 'Enter Command' })
   
   -- Normal mode: Enter to rerun command at cursor
   vim.keymap.set('n', '<CR>', function()
@@ -595,9 +586,6 @@ function M.open()
   setup_keymaps()
   
   state.is_open = true
-  
-  -- Start in insert mode (terminal-style)
-  enter_insert_mode()
 end
 
 -- Expose completion function for v:lua access
