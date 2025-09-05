@@ -88,6 +88,11 @@ require("lazy").setup({
     { "mason-org/mason.nvim",
       opts = {},
     },
+    { "noelr/floating-cmdline.nvim",
+      config = function()
+        require('floating-cmdline').setup()
+      end,
+    },
   },
   -- Configure any other settings here. See the documentation for more details.
   -- colorscheme that will be used when installing plugins.
@@ -96,5 +101,3 @@ require("lazy").setup({
   -- checker = { enabled = true },
 })
 
--- Setup floating command line
-require('floating-cmdline').setup()
