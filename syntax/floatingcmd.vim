@@ -9,8 +9,11 @@ endif
 " Match command lines (non-indented, non-empty lines)
 syntax match floatingcmdCommand "^\s\@!.*$"
 
-" Match output lines (lines starting with two spaces)
-syntax match floatingcmdOutput "^  .*$"
+" Match metadata lines (lines starting with --CMD:)
+syntax match floatingcmdMetadata "^  --CMD:.*$"
+
+" Match output lines (lines starting with two spaces, but not metadata)
+syntax match floatingcmdOutput "^  \(--CMD:\)\@!.*$"
 
 " Match error lines (lines containing Error:)
 syntax match floatingcmdError "^  Error:.*$"
@@ -19,5 +22,6 @@ syntax match floatingcmdError "^  Error:.*$"
 hi def link floatingcmdCommand Statement
 hi def link floatingcmdOutput Comment  
 hi def link floatingcmdError ErrorMsg
+hi def link floatingcmdMetadata NonText
 
 let b:current_syntax = "floatingcmd"

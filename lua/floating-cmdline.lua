@@ -157,6 +157,64 @@ local function get_command_output_range(cmd_line)
   return start_line, end_line
 end
 
+-- Get metadata from output (if it exists)
+local function get_output_metadata(line_num)
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return nil, nil
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  
+  -- Check if the next line after the command is metadata
+  if line_num < #lines then
+    local next_line = lines[line_num + 1]
+    if next_line and next_line:match('^  %-%-CMD:') then
+      -- Extract original command from metadata
+      local original_cmd = next_line:match('^  %-%-CMD:(.*)$')
+      return original_cmd, line_num + 1
+    end
+  end
+  
+  return nil, nil
+end
+
+-- Clear output for commands that have been edited
+local function clear_outdated_output()
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  local lines_to_delete = {}
+  
+  -- Scan through all lines to find commands with metadata
+  for i = 1, #lines do
+    local line = lines[i]
+    -- Is this a command line (not indented, has content)?
+    if line and not line:match('^%s%s') and line:match('%S') then
+      local cmd = line:gsub('^%s*(.-)%s*$', '%1')
+      local stored_cmd, metadata_line = get_output_metadata(i)
+      
+      if stored_cmd then
+        -- This command has output with metadata
+        if cmd ~= stored_cmd then
+          -- Command has been edited, mark its output for deletion
+          local start_line, end_line = get_command_output_range(i)
+          if start_line and end_line then
+            table.insert(lines_to_delete, {start = start_line, end_line = end_line})
+          end
+        end
+      end
+    end
+  end
+  
+  -- Delete outdated output from bottom to top to preserve line numbers
+  for i = #lines_to_delete, 1, -1 do
+    local range = lines_to_delete[i]
+    vim.api.nvim_buf_set_lines(state.buf, range.start - 1, range.end_line, false, {})
+  end
+end
+
 -- Custom completion function for command completion
 local function command_complete(findstart, base)
   if findstart == 1 then
@@ -288,16 +346,17 @@ local function execute_current_line()
   if not ok then
     table.insert(output_lines, '  Error: ' .. result)  -- Error with indent
   elseif result and result ~= '' then
-    -- Skip output for Explore command (produces noise)
-    local is_explore = cmd:match('^[Ee]xplore?%s*')
-    if not is_explore then
-      for line in result:gmatch('[^\r\n]+') do
-        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-        if trimmed ~= '' then
-          table.insert(output_lines, '  ' .. trimmed)
-        end
+    for line in result:gmatch('[^\r\n]+') do
+      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+      if trimmed ~= '' then
+        table.insert(output_lines, '  ' .. trimmed)
       end
     end
+  end
+  
+  -- Add metadata as first line of output (if there is output)
+  if #output_lines > 0 then
+    table.insert(output_lines, 1, '  --CMD:' .. cmd)
   end
   
   -- Insert output directly after the command line
@@ -399,16 +458,17 @@ local function rerun_command_at_cursor()
     table.insert(output_lines, '  Error: ' .. result)
     is_error = true
   elseif result and result ~= '' then
-    -- Skip output for Explore command (produces noise)
-    local is_explore = cmd:match('^[Ee]xplore?%s*')
-    if not is_explore then
-      for line in result:gmatch('[^\r\n]+') do
-        local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-        if trimmed ~= '' then
-          table.insert(output_lines, '  ' .. trimmed)
-        end
+    for line in result:gmatch('[^\r\n]+') do
+      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+      if trimmed ~= '' then
+        table.insert(output_lines, '  ' .. trimmed)
       end
     end
+  end
+  
+  -- Add metadata as first line of output (if there is output)
+  if #output_lines > 0 then
+    table.insert(output_lines, 1, '  --CMD:' .. cmd)
   end
   
   -- Insert output after the command line
@@ -494,6 +554,17 @@ end
 local function setup_keymaps()
   -- Set up autocmds
   local augroup = vim.api.nvim_create_augroup('FloatingCommandLine', { clear = true })
+  
+  -- Detect command changes and clear outdated output
+  vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI'}, {
+    buffer = state.buf,
+    group = augroup,
+    callback = function()
+      -- Use vim.schedule to avoid conflicts during editing
+      vim.schedule(clear_outdated_output)
+    end,
+    desc = 'Clear output when commands change'
+  })
   
   -- Insert mode: Enter to execute current line
   vim.keymap.set('i', '<CR>', function()
@@ -608,7 +679,7 @@ function M.setup(opts)
   end
   
   -- Set up global keymap
-  vim.keymap.set('n', '<C-o>', M.open, { silent = true, desc = 'Open floating command line' })
+  vim.keymap.set('n', '|', M.open, { silent = true, desc = 'Open floating command line' })
 end
 
 return M
