@@ -87,42 +87,9 @@ local function create_window()
   -- Window options
   vim.api.nvim_win_set_option(state.win, 'wrap', true)
   vim.api.nvim_win_set_option(state.win, 'scrolloff', 0)
+  
 end
 
--- Append content to buffer
-local function append_to_buffer(lines, is_error)
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
-    return
-  end
-  
-  -- Get current content
-  local current_lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
-  
-  -- If buffer only contains one empty line, replace it instead of appending
-  if #current_lines == 1 and current_lines[1] == '' then
-    current_lines = {}
-  end
-  
-  -- Track where new lines start for highlighting
-  local start_line = #current_lines
-  
-  -- Append new lines
-  for _, line in ipairs(lines) do
-    table.insert(current_lines, line)
-  end
-  
-  -- Update buffer
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, current_lines)
-  
-  -- With custom syntax, we don't need manual highlighting anymore
-  -- The syntax file handles it automatically
-  
-  -- Scroll to bottom if window is valid
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    local line_count = #current_lines
-    vim.api.nvim_win_set_cursor(state.win, {line_count, 0})
-  end
-end
 
 -- Find the output range for a command at given line
 local function get_command_output_range(cmd_line)
@@ -176,6 +143,36 @@ local function get_output_metadata(line_num)
   end
   
   return nil, nil
+end
+
+-- Expand truncated output at the given line
+local function expand_truncated_output(summary_line_num)
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return
+  end
+  
+  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  local summary_line = lines[summary_line_num]
+  
+  -- Verify we're actually on a summary line
+  if not summary_line or not summary_line:match('^  %.%.%. .* more lines$') then
+    return
+  end
+  
+  -- Try to get hidden content from buffer variable
+  local hidden_lines = {}
+  local success, stored_lines = pcall(vim.api.nvim_buf_get_var, state.buf, 'hidden_' .. summary_line_num)
+  if success and stored_lines then
+    hidden_lines = stored_lines
+  end
+  
+  -- Replace the summary line with hidden content if we have it
+  if #hidden_lines > 0 then
+    -- Replace summary line with all the hidden content
+    vim.api.nvim_buf_set_lines(state.buf, summary_line_num - 1, summary_line_num, false, hidden_lines)
+    -- Clean up the buffer variable since we've expanded it
+    pcall(vim.api.nvim_buf_del_var, state.buf, 'hidden_' .. summary_line_num)
+  end
 end
 
 -- Clear output for commands that have been edited
@@ -359,13 +356,37 @@ local function execute_current_line()
     table.insert(output_lines, 1, '  --CMD:' .. cmd)
   end
   
+  -- Truncate long output (threshold: 9 lines including metadata)
+  local final_lines = {}
+  if #output_lines > 9 then
+    -- Show metadata + first 8 content lines
+    for i = 1, 9 do
+      table.insert(final_lines, output_lines[i])
+    end
+    -- Add summary line and store hidden content in buffer variable
+    local hidden_count = #output_lines - 9
+    local summary_line = '  ... ' .. hidden_count .. ' more lines'
+    table.insert(final_lines, summary_line)
+    
+    -- Store hidden lines in buffer variable for later expansion
+    local hidden_lines = {}
+    for i = 10, #output_lines do
+      table.insert(hidden_lines, output_lines[i])
+    end
+    -- Store hidden content with a unique key based on summary line position
+    local summary_line_pos = line_num + #final_lines
+    vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. summary_line_pos, hidden_lines)
+  else
+    final_lines = output_lines
+  end
+  
   -- Insert output directly after the command line
-  if #output_lines > 0 then
-    vim.api.nvim_buf_set_lines(state.buf, line_num, line_num, false, output_lines)
+  if #final_lines > 0 then
+    vim.api.nvim_buf_set_lines(state.buf, line_num, line_num, false, final_lines)
   end
   
   -- Move cursor to the line after the output (or stay on command if no output)
-  local new_cursor_line = line_num + #output_lines + 1
+  local new_cursor_line = line_num + #final_lines + 1
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
   
   -- If we're at the end of the buffer, add an empty line for the next command
@@ -382,21 +403,6 @@ local function execute_current_line()
   end
 end
 
--- Prepare for command entry (add new line at bottom)
-local function prepare_command_line()
-  -- Check if last line is already empty
-  local total_lines = vim.api.nvim_buf_line_count(state.buf)
-  local last_line = vim.api.nvim_buf_get_lines(state.buf, total_lines - 1, total_lines, false)[1] or ''
-  
-  -- Only add empty line if the last line is not empty
-  if last_line:match('%S') then  -- Contains non-whitespace characters
-    append_to_buffer({''}, false)  -- Empty line is not error output
-    total_lines = vim.api.nvim_buf_line_count(state.buf)
-  end
-  
-  -- Move cursor to the last line
-  vim.api.nvim_win_set_cursor(state.win, {total_lines, 0})
-end
 
 -- Get command at cursor line (for rerun functionality)
 local function get_command_at_cursor()
@@ -471,9 +477,33 @@ local function rerun_command_at_cursor()
     table.insert(output_lines, 1, '  --CMD:' .. cmd)
   end
   
+  -- Truncate long output (threshold: 9 lines including metadata)
+  local final_lines = {}
+  if #output_lines > 9 then
+    -- Show metadata + first 8 content lines
+    for i = 1, 9 do
+      table.insert(final_lines, output_lines[i])
+    end
+    -- Add summary line and store hidden content in buffer variable
+    local hidden_count = #output_lines - 9
+    local summary_line = '  ... ' .. hidden_count .. ' more lines'
+    table.insert(final_lines, summary_line)
+    
+    -- Store hidden lines in buffer variable for later expansion
+    local hidden_lines = {}
+    for i = 10, #output_lines do
+      table.insert(hidden_lines, output_lines[i])
+    end
+    -- Store hidden content with a unique key based on summary line position
+    local summary_line_pos = cmd_line + #final_lines
+    vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. summary_line_pos, hidden_lines)
+  else
+    final_lines = output_lines
+  end
+  
   -- Insert output after the command line
-  if #output_lines > 0 then
-    vim.api.nvim_buf_set_lines(state.buf, cmd_line, cmd_line, false, output_lines)
+  if #final_lines > 0 then
+    vim.api.nvim_buf_set_lines(state.buf, cmd_line, cmd_line, false, final_lines)
     
     -- With custom syntax, highlighting is handled automatically
   end
@@ -592,10 +622,21 @@ local function setup_keymaps()
     end
   end, { buffer = state.buf, silent = true, expr = true })
   
-  -- Normal mode: Enter to rerun command at cursor
+  -- Normal mode: Enter to rerun command at cursor or expand truncated output
   vim.keymap.set('n', '<CR>', function()
-    rerun_command_at_cursor()
-  end, { buffer = state.buf, silent = true, desc = 'Rerun command at cursor' })
+    -- Check if we're on a truncation summary line
+    local cursor = vim.api.nvim_win_get_cursor(state.win)
+    local line_num = cursor[1]
+    local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+    
+    if current_line and current_line:match('^  %.%.%. .* more lines$') then
+      -- We're on a truncation summary line, expand it
+      expand_truncated_output(line_num)
+    else
+      -- Normal behavior: rerun command
+      rerun_command_at_cursor()
+    end
+  end, { buffer = state.buf, silent = true, desc = 'Rerun command or expand output' })
   
   -- Normal mode: dd to delete command and its output (or normal delete)
   vim.keymap.set('n', 'dd', function()

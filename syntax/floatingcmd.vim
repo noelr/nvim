@@ -18,10 +18,15 @@ syntax match floatingcmdOutput "^  \(--CMD:\)\@!.*$"
 " Match error lines (lines containing Error:)
 syntax match floatingcmdError "^  Error:.*$"
 
+" Match truncation summary lines
+syntax match floatingcmdTruncated "^  \.\.\. .* more lines$"
+
+
 " Define default highlighting
 hi def link floatingcmdCommand Statement
 hi def link floatingcmdOutput Comment  
 hi def link floatingcmdError ErrorMsg
 hi def link floatingcmdMetadata NonText
+hi def link floatingcmdTruncated Special
 
 let b:current_syntax = "floatingcmd"
